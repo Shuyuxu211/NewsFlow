@@ -17,7 +17,7 @@
 ### 1. 环境准备
 
 ```powershell
-cd news
+cd NewsFlow
 pip install uv
 uv sync
 ```
