@@ -2,7 +2,7 @@
 setlocal
 
 set "SCRIPT_DIR=%~dp0"
-set "SHORTCUT_NAME=NewsBot"
+set "SHORTCUT_NAME=每日新闻流"
 set "TARGET=%SCRIPT_DIR%start.bat"
 set "STARTUP_FOLDER=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
 set "SHORTCUT_PATH=%STARTUP_FOLDER%\%SHORTCUT_NAME%.lnk"
