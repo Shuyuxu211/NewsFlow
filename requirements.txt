@@ -20,4 +20,4 @@ fastapi==0.110.0
 uvicorn==0.27.1
 
 # AI 筛选（可选）
-openai==1.13.0
+openai>=1.13.0
