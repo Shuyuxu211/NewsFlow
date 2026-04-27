@@ -177,7 +177,7 @@
 ## 目录结构
 
 ```
-news/
+NewsFlow/
 ├── src/
 │   ├── cli/           # 命令行界面
 │   │   └── cli.py
@@ -209,7 +209,6 @@ news/
 │   └── newsletter_*.html
 ├── .venv/             # 虚拟环境（git 忽略）
 ├── api_config.env     # AI 配置（git 忽略）
-├── api_config.env.example  # 配置模板
 ├── main.py            # 入口文件
 ├── requirements.txt   # 依赖列表
 ├── start.bat          # 启动脚本
@@ -254,8 +253,7 @@ pip install uv
 uv sync
 
 # 3. 配置环境变量
-copy api_config.env.example api_config.env
-# 编辑 api_config.env 填入 API Key
+# 在项目根目录创建 api_config.env 文件，填入 API Key
 
 # 4. 启动服务
 python main.py web --port 8000

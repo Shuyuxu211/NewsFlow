@@ -24,21 +24,26 @@ uv sync
 
 ### 2. 配置 AI API
 
-复制 `api_config.env.example` 为 `api_config.env`：
-
-```powershell
-copy api_config.env.example api_config.env
-```
-
-编辑 `api_config.env`，填入你的 API Key：
+在项目根目录创建 `api_config.env` 文件，填入以下配置：
 
 ```env
 AI_PROVIDER=qwen
 AI_API_KEY=你的 API 密钥
 AI_MODEL=Qwen/Qwen3-8B
 AI_TRANSLATE_ENABLED=true
-HTTP_PROXY=http://127.0.0.1:7897
+HTTP_PROXY=http://127.0.0.1:7890
 ```
+
+**配置说明：**
+
+| 配置项 | 必填 | 说明 |
+|--------|------|------|
+| `AI_PROVIDER` | 是 | AI 提供商：`qwen` / `gemini` / `zhipu` / `groq` / `openai` / `deepseek` |
+| `AI_API_KEY` | 是 | 你的 API Key |
+| `AI_API_BASE` | 否 | API Base URL，留空使用默认值 |
+| `AI_MODEL` | 否 | 模型名称，留空使用默认模型 |
+| `AI_TRANSLATE_ENABLED` | 否 | 翻译功能开关：`true` / `false` |
+| `HTTP_PROXY` | 否 | HTTP 代理（用于访问国外 RSS 源），留空不使用代理 |
 
 **支持的 AI 提供商：**
 
