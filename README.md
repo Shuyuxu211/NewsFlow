@@ -37,7 +37,7 @@ AI_PROVIDER=qwen
 AI_API_KEY=你的API密钥
 AI_MODEL=Qwen/Qwen3-8B
 AI_TRANSLATE_ENABLED=true
-HTTP_PROXY=http://127.0.0.1:7897
+HTTP_PROXY=http://127.0.0.1:7890
 ```
 
 **支持的 AI 提供商：**
