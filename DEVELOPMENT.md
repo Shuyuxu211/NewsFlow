@@ -256,6 +256,7 @@ uv sync
 # 在项目根目录创建 api_config.env 文件，填入 API Key
 
 # 4. 启动服务
+.\.venv\Scripts\Activate.ps1
 python main.py web --port 8000
 ```
 

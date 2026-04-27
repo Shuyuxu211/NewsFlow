@@ -59,10 +59,13 @@ HTTP_PROXY=http://127.0.0.1:7890
 ### 3. 启动服务
 
 ```powershell
-# 方式1：双击 start.bat（自动激活虚拟环境）
-# 方式2：命令行
-.venv\Scripts\activate.bat
+# 方式1：双击 start.bat（自动激活虚拟环境并启动）
+# 方式2：命令行手动激活
+.\.venv\Scripts\Activate.ps1
 python main.py web --port 8000
+
+# 方式3：不激活虚拟环境直接运行
+.\.venv\Scripts\python.exe main.py web --port 8000
 
 # 访问 http://127.0.0.1:8000
 ```
