@@ -87,13 +87,19 @@ class NewsScheduler:
             else:
                 logger.info("翻译功能未启用或未配置AI")
 
-            logger.info("步骤5: 生成简报")
+            logger.info("步骤5: 事件去重")
+            deduplicated = ai_filter._event_deduplicate(filtered)
+            if len(deduplicated) < len(filtered):
+                logger.info(f"事件去重完成: {len(filtered)} -> {len(deduplicated)} 条")
+            filtered = deduplicated
+
+            logger.info("步骤6: 生成简报")
             generator = NewsletterGenerator()
             path = generator.generate(filtered)
             if path:
                 logger.info(f"简报已生成: {path}")
 
-            logger.info("步骤6: 邮件推送")
+            logger.info("步骤7: 邮件推送")
             email_sender = EmailSender()
             if email_sender.is_configured():
                 tz = timezone(timedelta(hours=8))
@@ -107,7 +113,7 @@ class NewsScheduler:
             else:
                 logger.info("邮件推送未配置，跳过")
 
-            logger.info("步骤7: 清理旧新闻")
+            logger.info("步骤8: 清理旧新闻")
             deleted_count = self.storage.clean_old_news(days=7)
 
             logger.info(f"每日任务执行完成: 采集 {len(news_list)} 条, 保存 {saved_count} 条, 筛选 {len(filtered)} 条, 清理 {deleted_count} 条旧新闻")

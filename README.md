@@ -152,12 +152,13 @@ src/
 
 ## 常见问题
 
-1. **英文源采集失败** — 配置 `HTTP_PROXY` 使用代理访问 BBC/NYT/Financial Times/Bloomberg/Reuters/半岛电视台 RSS
-2. **AI 返回空结果** — Qwen3-8B 可能触发思考模式导致超时，确认 `enable_thinking: False` 已生效
-3. **简报格式不对** — 重启 Web 服务后刷新页面
-4. **端口冲突** — `python main.py web --port 8001`
-5. **邮件发送失败** — 检查 SMTP 配置和授权码
-6. **某来源无内容** — 检查该源 RSS URL 是否有效，可在 Web 后台查看采集日志
+1. **PowerShell 无法激活虚拟环境** — 运行 `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser` 允许脚本执行，或使用方式3直接运行
+2. **英文源采集失败** — 配置 `HTTP_PROXY` 使用代理访问 BBC/NYT/Financial Times/Bloomberg/Reuters/半岛电视台 RSS
+3. **AI 返回空结果** — Qwen3-8B 可能触发思考模式导致超时，确认 `enable_thinking: False` 已生效
+4. **简报格式不对** — 重启 Web 服务后刷新页面
+5. **端口冲突** — `python main.py web --port 8001`
+6. **邮件发送失败** — 检查 SMTP 配置和授权码
+7. **某来源无内容** — 检查该源 RSS URL 是否有效，可在 Web 后台查看采集日志
 
 ## 版本历史
 
