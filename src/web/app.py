@@ -293,9 +293,9 @@ async def collect_news():
             collector = NewsCollector()
             news = await _run_in_background(collector.collect_news)
             _update_task(task_id, 80, f"采集到 {len(news)} 条，正在保存...")
-            saved = storage.save_news(news)
-            _update_task(task_id, 100, f"采集完成: 共采集 {len(news)} 条, 保存 {saved} 条",
-                         {"collected": len(news), "saved": saved}, "completed")
+            saved, skipped = storage.save_news(news)
+            _update_task(task_id, 100, f"采集完成: 共采集 {len(news)} 条, 新增 {saved} 条, 跳过 {skipped} 条重复",
+                         {"collected": len(news), "saved": saved, "skipped": skipped}, "completed")
         except Exception as e:
             _update_task(task_id, 100, f"采集失败: {str(e)}", None, "failed")
 
@@ -401,8 +401,8 @@ async def run_daily_task():
             _update_task(task_id, 5, "步骤1/7: 正在采集新闻...")
             collector = NewsCollector()
             news = await _run_in_background(collector.collect_news)
-            saved = storage.save_news(news)
-            _update_task(task_id, 20, f"步骤2/7: 采集完成({saved}条)，正在AI筛选...")
+            saved, skipped = storage.save_news(news)
+            _update_task(task_id, 20, f"步骤2/7: 采集完成(新增{saved}条, 跳过{skipped}条)，正在AI筛选...")
 
             ai_filter = AIFilter()
             all_news = storage.get_news(limit=200)

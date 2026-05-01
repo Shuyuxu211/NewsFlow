@@ -85,9 +85,9 @@ class AIClient:
 
         if self.provider == 'deepseek':
             if not self.api_base or self.api_base == 'https://api.openai.com/v1':
-                self.api_base = 'https://api.deepseek.com/v1'
+                self.api_base = 'https://api.deepseek.com'
             if not self.model or self.model == 'gpt-4o-mini':
-                self.model = 'deepseek-chat'
+                self.model = 'deepseek-v4-flash'
         elif self.provider == 'gemini':
             if not self.api_base or self.api_base == 'https://api.openai.com/v1':
                 self.api_base = 'https://generativelanguage.googleapis.com/v1beta/'
@@ -125,6 +125,10 @@ class AIClient:
             self.request_delay = 12
             self.max_retries = 3
             self.batch_size = 5
+        elif self.provider == 'deepseek':
+            self.request_delay = 0.5
+            self.max_retries = 3
+            self.batch_size = 20
         else:
             self.request_delay = 2
             self.max_retries = 3
@@ -159,6 +163,8 @@ class AIClient:
                     timeout=httpx.Timeout(60.0),
                     limits=httpx.Limits(max_connections=1, max_keepalive_connections=1)
                 )
+            elif self.provider == 'deepseek':
+                http_client = httpx.Client(timeout=30.0)
             else:
                 http_client = httpx.Client(timeout=60.0)
             AIClient._clients[key] = openai.OpenAI(
@@ -184,7 +190,9 @@ class AIClient:
             }
 
             if self.provider == 'qwen':
-                kwargs["extra_body"] = {"enable_thinking": False}
+                kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+            elif self.provider == 'deepseek':
+                kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
 
             if json_mode and self.provider not in ('groq', 'gemini'):
                 kwargs["response_format"] = {"type": "json_object"}
@@ -205,6 +213,20 @@ class AIClient:
                         content = re.sub(r'<think[\s\S]*?</think\s*>', '', content).strip()
                         if elapsed > 30:
                             logger.warning(f"Qwen 响应时间过长({elapsed:.1f}s)，可能触发了思考模式")
+                    if self.provider == 'deepseek' and not content:
+                        if json_mode and 'response_format' in kwargs:
+                            logger.warning("DeepSeek json_mode 返回空响应，关闭 json_mode 重试")
+                            kwargs.pop("response_format", None)
+                            kwargs["messages"][0]["content"] += "\n\n你必须严格按JSON格式返回：{\"results\":{...}}"
+                            time.sleep(0.5)
+                            json_mode = False
+                            continue
+                        if attempt < self.max_retries - 1:
+                            logger.warning(f"DeepSeek 返回空响应 (attempt {attempt+1})，1秒后重试")
+                            time.sleep(1)
+                            continue
+                        logger.error("DeepSeek 多次返回空响应，批次丢弃")
+                        return None
                     return content
                 except Exception as e:
                     error_str = str(e)
@@ -455,6 +477,22 @@ class AIFilter:
 
         filtered.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
         max_news = rules.get('max_news', 20)
+
+        if len(filtered) < 5:
+            logger.warning(f"关键词筛选结果不足({len(filtered)}条)，放宽条件补充")
+            existing = {id(n) for n in filtered}
+            for news in news_list:
+                if id(news) in existing:
+                    continue
+                news['relevance_score'] = 1
+                if not news.get('ai_summary'):
+                    news['ai_summary'] = self._generate_simple_summary(news)
+                filtered.append(news)
+                existing.add(id(news))
+                if len(filtered) >= max_news:
+                    break
+
+        filtered.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
         return self._ensure_source_diversity(filtered, max_news)
 
     def _generate_simple_summary(self, news: Dict[str, Any]) -> str:
@@ -1107,9 +1145,15 @@ Separate each item with a blank line.
             )
 
             if not result_text:
+                logger.warning(f"翻译批次返回空结果，共 {len(batch)} 条新闻未翻译")
                 continue
 
             blocks = [b.strip() for b in result_text.strip().split('\n\n') if b.strip()]
+            expected = len(batch)
+            actual = len(blocks)
+            if actual < expected:
+                logger.warning(f"翻译解析块数量不匹配: 期望 {expected} 块, 实际 {actual} 块, 将逐条回退重试缺失项")
+
             for i, news in enumerate(batch):
                 if i < len(blocks):
                     lines = [l.strip() for l in blocks[i].split('\n') if l.strip()]
@@ -1124,6 +1168,52 @@ Separate each item with a blank line.
                         news['title_original'] = news['title']
                         news['title'] = lines[0]
                         news['translated'] = 1
+                    else:
+                        logger.warning(f"翻译解析失败: 块 {i} 无有效行，来源={news.get('source')}, 标题={news.get('title', '')[:60]}")
+                        self._translate_single_fallback(news)
+                else:
+                    logger.warning(f"翻译解析失败: 块 {i} 缺失，来源={news.get('source')}, 标题={news.get('title', '')[:60]}")
+                    self._translate_single_fallback(news)
+
+    def _translate_single_fallback(self, news: Dict[str, Any]) -> None:
+        title = news.get('title', '')
+        summary = (news.get('summary', '') or '')[:300]
+        if not news.get('ai_summary'):
+            prompt = f"""Translate the following English news into Simplified Chinese. Return EXACTLY two lines:
+Line 1: Chinese title (concise, include key entities)
+Line 2: Chinese summary (one sentence, 30-80 chars, include who did what + specific impact)
+
+Title: {title}
+Summary: {summary}"""
+        else:
+            prompt = f"""Translate the following English news title into Simplified Chinese. Return ONLY the Chinese title, one line.
+
+Title: {title}"""
+
+        result_text = self.client.chat(
+            system_prompt="You are a professional English-to-Chinese news translator. Preserve ALL key facts.",
+            user_prompt=prompt,
+            temperature=0.3,
+            max_tokens=500,
+            json_mode=False
+        )
+
+        if not result_text:
+            logger.warning(f"逐条翻译回退失败(API返回空): {title[:60]}")
+            return
+
+        lines = [l.strip() for l in result_text.strip().split('\n') if l.strip()]
+        if not lines:
+            logger.warning(f"逐条翻译回退失败(无有效行): {title[:60]}")
+            return
+
+        news['title_original'] = news['title']
+        news['title'] = lines[0]
+        if not news.get('ai_summary') and len(lines) >= 2:
+            news['summary_original'] = news.get('summary', '')
+            news['summary'] = lines[1]
+        news['translated'] = 1
+        logger.info(f"逐条翻译回退成功: {title[:60]} -> {lines[0][:60]}")
 
     async def _translate_batch_text_async(self, news_batch: List[Dict[str, Any]]) -> None:
         batch_size = 5
@@ -1154,9 +1244,15 @@ Separate each item with a blank line.
             )
 
             if not result_text:
+                logger.warning(f"翻译批次返回空结果，共 {len(batch)} 条新闻未翻译")
                 continue
 
             blocks = [b.strip() for b in result_text.strip().split('\n\n') if b.strip()]
+            expected = len(batch)
+            actual = len(blocks)
+            if actual < expected:
+                logger.warning(f"翻译解析块数量不匹配: 期望 {expected} 块, 实际 {actual} 块, 将逐条回退重试缺失项")
+
             for i, news in enumerate(batch):
                 if i < len(blocks):
                     lines = [l.strip() for l in blocks[i].split('\n') if l.strip()]
@@ -1171,3 +1267,9 @@ Separate each item with a blank line.
                         news['title_original'] = news['title']
                         news['title'] = lines[0]
                         news['translated'] = 1
+                    else:
+                        logger.warning(f"翻译解析失败: 块 {i} 无有效行，来源={news.get('source')}, 标题={news.get('title', '')[:60]}")
+                        self._translate_single_fallback(news)
+                else:
+                    logger.warning(f"翻译解析失败: 块 {i} 缺失，来源={news.get('source')}, 标题={news.get('title', '')[:60]}")
+                    self._translate_single_fallback(news)

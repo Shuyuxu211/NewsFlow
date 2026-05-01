@@ -40,3 +40,4 @@ logs/
 # Temporary Files
 *.tmp
 *.bak
+_git_*.txt

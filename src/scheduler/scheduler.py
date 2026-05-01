@@ -59,7 +59,7 @@ class NewsScheduler:
                 return
 
             logger.info("步骤2: 存储新闻")
-            saved_count = self.storage.save_news(news_list)
+            saved_count, skipped_count = self.storage.save_news(news_list)
 
             if saved_count == 0:
                 logger.warning("没有新新闻需要存储")

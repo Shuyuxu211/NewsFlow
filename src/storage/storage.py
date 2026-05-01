@@ -117,8 +117,9 @@ class NewsStorage:
         except Exception as e:
             logger.error(f"初始化数据库时出错: {str(e)}")
 
-    def save_news(self, news_list: List[Dict[str, Any]]) -> int:
+    def save_news(self, news_list: List[Dict[str, Any]]) -> tuple[int, int]:
         saved_count = 0
+        skipped_count = 0
 
         try:
             with sqlite3.connect(self.db_path) as conn:
@@ -128,6 +129,7 @@ class NewsStorage:
                     try:
                         cursor.execute('SELECT id FROM news WHERE content_hash = ?', (news['content_hash'],))
                         if cursor.fetchone():
+                            skipped_count += 1
                             continue
 
                         cursor.execute('''
@@ -150,17 +152,18 @@ class NewsStorage:
                         saved_count += 1
 
                     except sqlite3.IntegrityError:
+                        skipped_count += 1
                         continue
                     except Exception as e:
                         logger.error(f"保存新闻时出错: {str(e)}")
 
                 conn.commit()
-                logger.info(f"成功保存 {saved_count} 条新闻")
+                logger.info(f"成功保存 {saved_count} 条新闻，跳过 {skipped_count} 条重复")
 
         except Exception as e:
             logger.error(f"保存新闻列表时出错: {str(e)}")
 
-        return saved_count
+        return (saved_count, skipped_count)
 
     def update_translation(self, news_id: int, title: str, summary: str, title_original: str, summary_original: str) -> bool:
         try:

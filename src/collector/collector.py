@@ -97,7 +97,7 @@ class NewsCollector:
                         if any(kw.lower() in text for kw in source_exclude):
                             continue
                     if not news['summary'] or len(news['summary']) < 100:
-                        full_content = self._fetch_full_content(news['link'])
+                        _, full_content = self._fetch_full_content(news['link'])
                         if full_content:
                             news['summary'] = full_content
                     news_list.append(news)

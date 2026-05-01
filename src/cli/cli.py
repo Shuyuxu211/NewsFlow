@@ -32,9 +32,9 @@ def collect():
             return
 
         storage = NewsStorage()
-        saved_count = storage.save_news(news_list)
+        saved_count, skipped_count = storage.save_news(news_list)
 
-        click.echo(f"采集完成: 共采集 {len(news_list)} 条新闻, 保存 {saved_count} 条")
+        click.echo(f"采集完成: 共采集 {len(news_list)} 条新闻, 新增 {saved_count} 条, 跳过 {skipped_count} 条重复")
 
     except Exception as e:
         click.echo(f"采集新闻时出错: {str(e)}")

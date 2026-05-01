@@ -7,7 +7,7 @@
 - **多来源采集**：国内（新华社、财联社、财经杂志、财新网）+ 国际（BBC、纽约时报、Financial Times、Bloomberg、Reuters、半岛电视台）
 - **AI 智能筛选**：自动识别并排除宣传通稿、礼节性报道等低信息量内容，保留实质性新闻
 - **话题分类**：国际局势、政策监管、财经市场、科技产业、其他，按主题组织内容
-- **自动翻译**：英文新闻自动翻译为简体中文
+- **自动翻译**：英文新闻自动翻译为简体中文，翻译失败自动逐条回退重试
 - **Web 后台管理**：可视化配置新闻源、筛选规则、AI 模型、邮件推送
 - **定时任务**：每日 6:00 自动执行完整流程
 - **简报输出**：生成 HTML 简报，支持邮件推送
@@ -52,7 +52,7 @@ HTTP_PROXY=http://127.0.0.1:7890
 | 硅基流动 | `qwen` | `Qwen/Qwen3-8B` | 推荐，免费，1000 RPM |
 | Google Gemini | `gemini` | `gemini-3.1-flash-lite` | 免费，15 RPM |
 | 智谱 AI | `zhipu` | `glm-4-flash` | 按量付费 |
-| Groq | `groq` | `llama-3.1-8b-instant` | 免费，有速率限制 |
+| Groq | `groq` | `llama-3.3-70b-versatile` | 免费，有速率限制 |
 | DeepSeek | `deepseek` | `deepseek-chat` | 按量付费 |
 | OpenAI | `openai` | `gpt-4o-mini` | 按量付费 |
 
@@ -154,13 +154,18 @@ src/
 
 1. **PowerShell 无法激活虚拟环境** — 运行 `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser` 允许脚本执行，或使用方式3直接运行
 2. **英文源采集失败** — 配置 `HTTP_PROXY` 使用代理访问 BBC/NYT/Financial Times/Bloomberg/Reuters/半岛电视台 RSS
-3. **AI 返回空结果** — Qwen3-8B 可能触发思考模式导致超时，确认 `enable_thinking: False` 已生效
-4. **简报格式不对** — 重启 Web 服务后刷新页面
+3. **AI 返回空结果** — Qwen3-8B 可能触发思考模式导致超时，系统已自动禁用思考模式并清除 `<think>` 标签
+4. **简报出现英文** — 翻译队列偶尔会遗漏个别条目，系统已加入逐条回退重试机制，关注日志中的 WARNING 可排查
 5. **端口冲突** — `python main.py web --port 8001`
 6. **邮件发送失败** — 检查 SMTP 配置和授权码
 7. **某来源无内容** — 检查该源 RSS URL 是否有效，可在 Web 后台查看采集日志
 
 ## 版本历史
+
+### 4.2.0 (2026-04-29)
+- **修复**：翻译批次解析失败时自动逐条回退重试，避免英文残留
+- **修复**：Qwen3 思考模式禁用方式修正为官方 `chat_template_kwargs` 格式
+- **优化**：翻译解析失败新增 WARNING 日志，方便排查
 
 ### 4.1.0
 - 新增 Reuters 和半岛电视台 RSS 源
