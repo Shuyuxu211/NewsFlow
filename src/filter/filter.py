@@ -8,6 +8,32 @@ from src.config.config import settings
 from src.storage.storage import NewsStorage
 import logging
 
+# 统一排除词表 — _coarse_filter 和 _keyword_filter 共用
+DEFAULT_EXCLUDE_KEYWORDS = [
+    # 娱乐/体育/八卦
+    '娱乐', '体育', '八卦', '明星', '综艺', '选秀', '球赛', '足球', '篮球',
+    # 付费墙标记
+    '专享', '解锁', '研选', 'VIP', 'vip', '付费', '订阅', '会员专享',
+    # 聚合/复盘/观点类
+    'T早报', '早报', '快讯集锦', '收盘', '复盘', '观点文章', '深度分析',
+    # 展会/旅游/乡村/农事
+    '消博', '博览会', '旅游', '茶山', '振兴', '农事', '乡村', '县域经济',
+    # 城市宣传/风光/摄影
+    '城市', '之城', '风光', '摄影', '无人机照片',
+    # 季节性/节日
+    '春日', '春暖', '花开', '踏青', '赏花', '五一', '假期',
+    # 校园/教育
+    '学校', '大学', '校友', '学长', '教育改革',
+    # 新华社类软性内容
+    '潮玩', '舞蹈', '夺冠', '奖牌', '金牌', '银牌', '致敬', '献礼',
+    # 新媒体/低质内容标记
+    'Vlog', 'vlog', '首发', '打卡', '美好生活', '城市介绍', '人物特写',
+    '学校宣传', '革命圣地', '历史故事', '文化报道',
+    # 特殊排除（原_keyword_filter独有）
+    '茶叶', '助手还是', '竞争对手', '得力助手', '如何被', '是得力',
+    '观察', '思考', '解读', '分析', '评论',
+]
+
 logger = logging.getLogger(__name__)
 
 FILTER_SYSTEM_PROMPT = """你是一个新闻筛选助手，为关注全球局势和市场动态的读者筛选有价值的新闻。
@@ -433,14 +459,7 @@ class AIFilter:
         return rules
 
     def _keyword_filter(self, news_list: List[Dict[str, Any]], rules: Dict[str, Any]) -> List[Dict[str, Any]]:
-        keyword_exclude = [
-            '茶叶', '旅游', '茶山', '乡村振兴', '农事', '乡村', '县域经济',
-            '城市介绍', '人物特写', '学校宣传', '革命圣地', '历史故事', '文化报道',
-            '消博', '博览会', '首发', '打卡', 'Vlog', 'vlog',
-            'T早报', '早报', '快讯集锦', '观点文章', '深度分析',
-            '助手还是', '竞争对手', '得力助手', '如何被', '是得力',
-            '观察', '思考', '解读', '分析', '评论',
-        ]
+        keyword_exclude = DEFAULT_EXCLUDE_KEYWORDS
 
         filtered = []
 
@@ -493,20 +512,51 @@ class AIFilter:
                     break
 
         filtered.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
-        return self._ensure_source_diversity(filtered, max_news)
+        result = self._ensure_source_diversity(filtered, max_news)
+
+        # 国内源保底：关键词降级模式也确保财经源不低于 2 条（排除新华社）
+        domestic_sources = {'财联社', '财经杂志', '财新网'}
+        min_domestic = min(2, max_news // 10)  # 至少 2 条
+        if len(result) < max_news:
+            domestic_in_result = [n for n in result if n.get('source') in domestic_sources]
+            if len(domestic_in_result) < min_domestic:
+                logger.info(f"关键词筛选财经源不足({len(domestic_in_result)}条 < {min_domestic})，补充")
+                existing_ids = {n.get('id') or n.get('link') for n in result}
+                for n in news_list:
+                    if n.get('source') not in domestic_sources:
+                        continue
+                    if (n.get('id') or n.get('link')) in existing_ids:
+                        continue
+                    n['relevance_score'] = n.get('relevance_score', 1)
+                    if not n.get('ai_summary'):
+                        n['ai_summary'] = self._generate_simple_summary(n)
+                    n['filter_reason'] = '（财经源保底补充）'
+                    result.append(n)
+                    existing_ids.add(n.get('id') or n.get('link'))
+                    domestic_in_result.append(n)
+                    if len(domestic_in_result) >= min_domestic:
+                        break
+                logger.info(f"财经源补充后: {len(domestic_in_result)} 条")
+
+        return result
 
     def _generate_simple_summary(self, news: Dict[str, Any]) -> str:
         summary = (news.get('summary', '') or '').strip()
         if not summary:
             return news.get('title', '')[:50]
 
-        first_sentence = summary.split('。')[0].split('！')[0].split('？')[0].strip()
-        if len(first_sentence) > 60:
-            first_sentence = first_sentence[:60] + '...'
-        elif not first_sentence:
-            first_sentence = summary[:60]
+        # 先用句号/感叹号/问号分割，再用中文逗号/分号分割
+        # 对齐 newsletter._generate_simple_summary() 的分割逻辑
+        for sep in ['。', '！', '？', '；', '，']:
+            parts = summary.split(sep)
+            for part in parts:
+                part = part.strip()
+                if len(part) > 8:
+                    if len(part) > 60:
+                        return part[:60] + '...'
+                    return part
 
-        return first_sentence
+        return summary[:60] + '...'
 
     def _two_round_filter(self, news_list: List[Dict[str, Any]], rules: Dict[str, Any]) -> List[Dict[str, Any]]:
         max_news = rules.get('max_news', 20)
@@ -545,6 +595,32 @@ class AIFilter:
 
         result = self._categorize_by_topic(deduplicated)
         logger.info(f"分类配额后: {len(result)} 条新闻")
+
+        # 国内源保底：仅针对财经类源（排除新华社），确保有少量中文财经内容
+        domestic_sources = {'财联社', '财经杂志', '财新网'}
+        min_domestic = min(2, max_news // 8)  # max_news=20 → 2条
+        if len(result) < max_news and coarse_filtered:
+            domestic_in_result = [n for n in result if n.get('source') in domestic_sources]
+            if len(domestic_in_result) < min_domestic:
+                logger.info(f"财经源不足({len(domestic_in_result)}条 < {min_domestic})，从粗筛结果补充")
+                existing_ids = {n.get('id') or n.get('link') for n in result}
+                for n in coarse_filtered:
+                    if n.get('source') not in domestic_sources:
+                        continue
+                    if (n.get('id') or n.get('link')) in existing_ids:
+                        continue
+                    if not n.get('ai_summary'):
+                        n['ai_summary'] = self._generate_simple_summary(n)
+                    n['filter_reason'] = '（财经源保底补充）'
+                    n['relevance_score'] = n.get('relevance_score', 5)
+                    n['topic'] = '其他'
+                    result.append(n)
+                    existing_ids.add(n.get('id') or n.get('link'))
+                    domestic_in_result.append(n)
+                    if len(domestic_in_result) >= min_domestic:
+                        break
+                logger.info(f"财经源补充后: {len(domestic_in_result)} 条, 共{len(result)}条")
+
         return result
 
     async def _two_round_filter_async(self, news_list: List[Dict[str, Any]], rules: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -584,6 +660,32 @@ class AIFilter:
 
         result = self._categorize_by_topic(deduplicated)
         logger.info(f"分类配额后: {len(result)} 条新闻")
+
+        # 国内源保底：仅针对财经类源（排除新华社），确保有少量中文财经内容
+        domestic_sources = {'财联社', '财经杂志', '财新网'}
+        min_domestic = min(2, max_news // 8)  # max_news=20 → 2条
+        if len(result) < max_news and coarse_filtered:
+            domestic_in_result = [n for n in result if n.get('source') in domestic_sources]
+            if len(domestic_in_result) < min_domestic:
+                logger.info(f"财经源不足({len(domestic_in_result)}条 < {min_domestic})，从粗筛结果补充")
+                existing_ids = {n.get('id') or n.get('link') for n in result}
+                for n in coarse_filtered:
+                    if n.get('source') not in domestic_sources:
+                        continue
+                    if (n.get('id') or n.get('link')) in existing_ids:
+                        continue
+                    if not n.get('ai_summary'):
+                        n['ai_summary'] = self._generate_simple_summary(n)
+                    n['filter_reason'] = '（财经源保底补充）'
+                    n['relevance_score'] = n.get('relevance_score', 5)
+                    n['topic'] = '其他'
+                    result.append(n)
+                    existing_ids.add(n.get('id') or n.get('link'))
+                    domestic_in_result.append(n)
+                    if len(domestic_in_result) >= min_domestic:
+                        break
+                logger.info(f"财经源补充后: {len(domestic_in_result)} 条, 共{len(result)}条")
+
         return result
 
     def _deduplicate_similar(self, news_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -605,7 +707,7 @@ class AIFilter:
 - 同一事件的不同报道（谈判、访问、会议等）只保留1条
 - 保留评分最高的
 - 如果评分相同，保留信息最完整的
-- 相似度>70%的应视为重复
+- 相似度>90%的应视为重复（宽松阈值，仅剔除完全重复报道，避免过度裁减）
 
 请以JSON格式返回：
 {{
@@ -659,7 +761,7 @@ class AIFilter:
 - 同一事件的不同报道（谈判、访问、会议等）只保留1条
 - 保留评分最高的
 - 如果评分相同，保留信息最完整的
-- 相似度>70%的应视为重复
+- 相似度>90%的应视为重复（宽松阈值，仅剔除完全重复报道，避免过度裁减）
 
 请以JSON格式返回：
 {{
@@ -791,18 +893,7 @@ class AIFilter:
     def _coarse_filter(self, news_list: List[Dict[str, Any]], rules: Dict[str, Any]) -> List[Dict[str, Any]]:
         filtered = []
         exclude_keywords = [r['value'].lower() for r in rules.get('exclude', [])]
-        default_exclude = [
-            '娱乐', '体育', '八卦', '明星', '综艺', '选秀', '球赛', '足球', '篮球',
-            '专享', '解锁', '研选', 'VIP', 'vip', '付费', '订阅', '会员专享',
-            'T早报', '早报', '快讯集锦', '收盘', '复盘',
-            '消博', '博览会', '旅游', '茶山', '振兴', '农事', '乡村',
-            'Vlog', 'vlog', '首发', '打卡', '美好生活',
-            '城市', '之城', '风光', '摄影', '无人机照片',
-            '春日', '春暖', '花开', '踏青', '赏花',
-            '学校', '大学', '校友', '学长', '教育改革',
-        ]
-
-        all_exclude = list(set(exclude_keywords + default_exclude))
+        all_exclude = list(set(exclude_keywords + DEFAULT_EXCLUDE_KEYWORDS))
 
         for news in news_list:
             title = news.get('title', '')
@@ -905,25 +996,31 @@ keep=1 表示保留，keep=0 表示排除。只保留 score>=5 的新闻。
 
 {news_text}"""
 
+        # 首次调用（json_mode=True）
         result_text = self.client.chat(
             system_prompt=FILTER_SYSTEM_PROMPT,
             user_prompt=prompt,
             json_mode=True
         )
 
+        # 重试：空结果或解析失败时关闭 json_mode 重试
         if not result_text:
-            logger.warning("AI筛选批次返回空结果")
-            return []
+            logger.warning("AI筛选批次返回空结果，关闭 json_mode 重试")
+            result_text = self.client.chat(
+                system_prompt=FILTER_SYSTEM_PROMPT,
+                user_prompt=prompt + "\n请务必以JSON格式返回，不要包含任何其他内容。",
+                json_mode=False
+            )
 
-        result = _extract_json(result_text)
+        result = _extract_json(result_text) if result_text else None
         if not result:
-            logger.warning(f"AI筛选结果解析失败，原始响应: {result_text[:300]}")
+            logger.warning(f"AI筛选结果解析失败（重试后），原始响应: {(result_text or '空')[:200]}")
             return []
 
         filtered = []
         results = result.get('results', {})
         if not results:
-            logger.warning(f"AI筛选结果无results字段，原始响应: {result_text[:200]}")
+            logger.warning(f"AI筛选结果无results字段（重试后），原始响应: {result_text[:200]}")
             return []
 
         logger.info(f"AI筛选批次结果: {len(results)}条评分, 保留{sum(1 for v in results.values() if v.get('keep',0)==1 and v.get('score',0)>=5)}条")
@@ -937,6 +1034,8 @@ keep=1 表示保留，keep=0 表示排除。只保留 score>=5 的新闻。
                 ai_summary = item_result.get('summary', '')
                 if ai_summary:
                     news['ai_summary'] = ai_summary
+                else:
+                    news['ai_summary'] = self._generate_simple_summary(news)
                 filtered.append(news)
 
         return filtered
@@ -981,18 +1080,22 @@ keep=1 表示保留，keep=0 表示排除。只保留 score>=5 的新闻。
         )
 
         if not result_text:
-            logger.warning("AI筛选批次返回空结果")
-            return []
+            logger.warning("AI筛选批次返回空结果，关闭 json_mode 重试")
+            result_text = await self.client.chat_async(
+                system_prompt=FILTER_SYSTEM_PROMPT,
+                user_prompt=prompt + "\n请务必以JSON格式返回，不要包含任何其他内容。",
+                json_mode=False
+            )
 
-        result = _extract_json(result_text)
+        result = _extract_json(result_text) if result_text else None
         if not result:
-            logger.warning(f"AI筛选结果解析失败，原始响应: {result_text[:300]}")
+            logger.warning(f"AI筛选结果解析失败（重试后），原始响应: {(result_text or '空')[:200]}")
             return []
 
         filtered = []
         results = result.get('results', {})
         if not results:
-            logger.warning(f"AI筛选结果无results字段，原始响应: {result_text[:200]}")
+            logger.warning(f"AI筛选结果无results字段（重试后），原始响应: {(result_text or '')[:200]}")
             return []
 
         logger.info(f"AI筛选批次结果: {len(results)}条评分, 保留{sum(1 for v in results.values() if v.get('keep',0)==1 and v.get('score',0)>=5)}条")
@@ -1006,6 +1109,8 @@ keep=1 表示保留，keep=0 表示排除。只保留 score>=5 的新闻。
                 ai_summary = item_result.get('summary', '')
                 if ai_summary:
                     news['ai_summary'] = ai_summary
+                else:
+                    news['ai_summary'] = self._generate_simple_summary(news)
                 filtered.append(news)
 
         return filtered

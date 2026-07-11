@@ -211,21 +211,36 @@ class NewsStorage:
                         if c not in ordered_cats:
                             ordered_cats.append(c)
 
-                    per_cat = max(limit // len(ordered_cats), 5) if ordered_cats else limit
+                    # 国内分类（中文/财经）获得更高配额，确保国内源新闻不被外媒淹没
+                    domestic_cats = {'中文', '财经'}
+                    n_domestic = sum(1 for c in ordered_cats if c in domestic_cats)
+                    n_other = len(ordered_cats) - n_domestic
+
+                    # 财经分类 25 条，中文（新华社）仅 15 条（新华社软性内容多，过多反而降低筛选效率）
+                    per_cat_quota = {'财经': 25, '中文': 15}
+                    default_domestic_quota = 20
 
                     ordered = []
+                    domestic_total_quota = sum(per_cat_quota.get(c, default_domestic_quota) for c in ordered_cats if c in domestic_cats)
                     for cat in ordered_cats:
+                        if cat in per_cat_quota:
+                            quota = per_cat_quota[cat]
+                        elif cat in domestic_cats:
+                            quota = default_domestic_quota
+                        else:
+                            quota = max((limit - domestic_total_quota) // max(n_other, 1), 5)
+
                         cursor.execute('''
-                            SELECT * FROM news 
+                            SELECT * FROM news
                             WHERE category = ?
                             ORDER BY published DESC NULLS LAST, collected_at DESC
                             LIMIT ?
-                        ''', (cat, per_cat))
+                        ''', (cat, quota))
                         rows = cursor.fetchall()
                         ordered.extend([self._row_to_dict(row) for row in rows])
 
                     ordered.sort(key=lambda x: x.get('published', '') or x.get('collected_at', ''), reverse=True)
-                    news_list = ordered[offset:offset + limit]
+                    news_list = ordered[:limit]
 
         except Exception as e:
             logger.error(f"获取新闻时出错: {str(e)}")

@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import sqlite3
@@ -8,7 +8,12 @@ import os
 import asyncio
 import uuid
 import time
+import shutil
+import subprocess
+import tempfile
+import re
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from src.config.config import settings
 from src.storage.storage import NewsStorage
 from src.collector.collector import NewsCollector
@@ -95,6 +100,75 @@ class EmailConfigUpdate(BaseModel):
     sender: Optional[str] = None
     recipients: Optional[str] = None
     use_ssl: Optional[bool] = None
+
+
+class NewsletterRenderRequest(BaseModel):
+    content: str
+
+
+def _find_chrome_executable() -> str:
+    configured = os.environ.get("NEWSFLOW_CHROME_PATH")
+    candidates = [
+        configured,
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        shutil.which("google-chrome"),
+        shutil.which("chromium"),
+        shutil.which("chromium-browser"),
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return candidate
+    raise RuntimeError("未找到 Chrome/Chromium。请设置 NEWSFLOW_CHROME_PATH 后重试。")
+
+
+def _render_newsletter_png(content: str) -> bytes:
+    if not content or len(content) > 2_000_000:
+        raise ValueError("简报内容为空或超过渲染大小限制")
+
+    chrome = _find_chrome_executable()
+    summaries = re.findall(
+        r'<a[^>]*class=["\']brief-summary["\'][^>]*>(.*?)</a>',
+        content,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if summaries:
+        estimated_items_height = 0
+        for summary in summaries:
+            text = re.sub(r'<[^>]+>', '', summary).strip()
+            estimated_lines = max(1, (len(text) + 21) // 22)
+            estimated_items_height += 58 + estimated_lines * 34
+        viewport_height = max(360, 230 + estimated_items_height)
+    else:
+        legacy_items = max(content.count('class="news-item"'), content.count("class='news-item'"), 1)
+        viewport_height = 260 + legacy_items * 220
+    viewport_height = min(viewport_height, 12_000)
+
+    with tempfile.TemporaryDirectory(prefix="newsflow-render-") as temp_dir:
+        temp_path = Path(temp_dir)
+        html_path = temp_path / "newsletter.html"
+        image_path = temp_path / "newsletter.png"
+        html_path.write_text(content, encoding="utf-8")
+        command = [
+            chrome,
+            "--headless=new",
+            "--disable-gpu",
+            "--hide-scrollbars",
+            "--no-first-run",
+            "--no-default-browser-check",
+            f"--user-data-dir={temp_path / 'profile'}",
+            "--force-device-scale-factor=2",
+            f"--window-size=540,{viewport_height}",
+            f"--screenshot={image_path}",
+            html_path.as_uri(),
+        ]
+        completed = subprocess.run(command, capture_output=True, timeout=45, check=False)
+        if completed.returncode != 0 or not image_path.is_file():
+            details = completed.stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"Chrome 图片渲染失败: {details or completed.returncode}")
+        return image_path.read_bytes()
 
 
 def _create_task(task_type: str) -> str:
@@ -311,9 +385,17 @@ async def filter_news():
         try:
             _update_task(task_id, 10, "正在加载新闻...")
             news_list = storage.get_news(limit=200)
+            if not news_list:
+                _update_task(task_id, 100, "生成失败：当前数据库没有新闻，请先执行采集。",
+                             {"total": 0, "filtered": 0, "reason": "no_source_news"}, "failed")
+                return
             _update_task(task_id, 30, f"正在AI筛选 {len(news_list)} 条新闻...")
             ai_filter = AIFilter()
             filtered = await ai_filter.filter_news_async(news_list)
+            if not filtered:
+                _update_task(task_id, 100, "生成失败：没有符合条件且在有效期内的新闻，请先采集最新新闻后再试。",
+                             {"total": len(news_list), "filtered": 0, "reason": "no_eligible_news"}, "failed")
+                return
             _update_task(task_id, 100, f"筛选完成: {len(news_list)} 条中筛选出 {len(filtered)} 条",
                          {"total": len(news_list), "filtered": len(filtered)}, "completed")
         except Exception as e:
@@ -383,6 +465,10 @@ async def generate_newsletter():
             _update_task(task_id, 80, "正在生成简报...")
             generator = NewsletterGenerator()
             path = await _run_in_background(generator.generate, filtered)
+            if not path:
+                _update_task(task_id, 100, "生成失败：简报未能保存，请查看服务日志。",
+                             {"total": len(news_list), "filtered": len(filtered), "reason": "newsletter_generation_failed"}, "failed")
+                return
             _update_task(task_id, 100, f"简报已生成, 包含 {len(filtered)} 条新闻",
                          {"path": path, "news_count": len(filtered)}, "completed")
         except Exception as e:
@@ -401,12 +487,20 @@ async def run_daily_task():
             _update_task(task_id, 5, "步骤1/7: 正在采集新闻...")
             collector = NewsCollector()
             news = await _run_in_background(collector.collect_news)
+            if not news:
+                _update_task(task_id, 100, "每日任务失败：未采集到新闻，未生成简报。",
+                             {"collected": 0, "filtered": 0, "reason": "no_source_news"}, "failed")
+                return
             saved, skipped = storage.save_news(news)
             _update_task(task_id, 20, f"步骤2/7: 采集完成(新增{saved}条, 跳过{skipped}条)，正在AI筛选...")
 
             ai_filter = AIFilter()
             all_news = storage.get_news(limit=200)
             filtered = await ai_filter.filter_news_async(all_news)
+            if not filtered:
+                _update_task(task_id, 100, "每日任务失败：没有符合条件且在有效期内的新闻，未生成简报。",
+                             {"collected": len(news), "saved": saved, "filtered": 0, "reason": "no_eligible_news"}, "failed")
+                return
             _update_task(task_id, 50, f"步骤3/7: 筛选完成({len(filtered)}条)，正在翻译...")
 
             translator = AITranslator()
@@ -422,6 +516,10 @@ async def run_daily_task():
 
             generator = NewsletterGenerator()
             path = await _run_in_background(generator.generate, filtered)
+            if not path:
+                _update_task(task_id, 100, "每日任务失败：简报未能保存。",
+                             {"collected": len(news), "saved": saved, "filtered": len(filtered), "reason": "newsletter_generation_failed"}, "failed")
+                return
             _update_task(task_id, 85, "步骤5/7: 简报已生成，正在检查邮件推送...")
 
             email_sender = EmailSender()
@@ -649,3 +747,16 @@ async def get_newsletter_html(date: str):
     if not newsletter:
         raise HTTPException(status_code=404, detail="简报不存在")
     return newsletter.get('content', '')
+
+
+@app.post("/api/render/newsletter")
+async def render_newsletter(request: NewsletterRenderRequest):
+    try:
+        png = await asyncio.to_thread(_render_newsletter_png, request.content)
+        return Response(
+            content=png,
+            media_type="image/png",
+            headers={"Cache-Control": "no-store"},
+        )
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=503, detail=str(e))

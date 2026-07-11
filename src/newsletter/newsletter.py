@@ -1,5 +1,5 @@
 import os
-import re
+from html import escape
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
 from src.config.config import settings
@@ -47,13 +47,16 @@ class NewsletterGenerator:
             return None
 
         try:
-            self.storage.save_newsletter({
+            newsletter_id = self.storage.save_newsletter({
                 'date': date_str,
                 'title': title,
                 'content': html,
                 'format': 'html',
                 'generated_at': now.isoformat()
             })
+            if newsletter_id is None:
+                logger.error("简报未能保存到数据库")
+                return None
         except Exception as e:
             logger.error(f"保存简报到数据库时出错: {str(e)}")
 
@@ -72,21 +75,19 @@ class NewsletterGenerator:
     def _generate_simple_summary(self, news: Dict[str, Any]) -> str:
         summary = (news.get('summary', '') or '').strip()
         if not summary:
-            return news.get('title', '无标题')[:50]
+            return news.get('title', '无标题')[:60]
 
-        text = summary
-        title = news.get('title', '')
-        if title and len(title) > 100:
-            text = title
+        # 先用句号/感叹号/问号分割，再用中文逗号分割（新华社常用逗号串联长句）
+        for sep in ['。', '！', '？', '；', '，']:
+            parts = summary.split(sep)
+            for part in parts:
+                part = part.strip()
+                if len(part) > 8:
+                    if len(part) > 60:
+                        return part[:60] + '...'
+                    return part
 
-        sentences = re.split(r'[。！？；]', text)
-        for s in sentences:
-            s = s.strip()
-            if len(s) > 10:
-                result = s + '...' if len(s) > 80 else s
-                return result
-
-        return text[:80] + '...'
+        return summary[:60] + '...'
 
     def _generate_html(
         self,
@@ -102,24 +103,25 @@ class NewsletterGenerator:
 
         items_html = ''
         for news in all_news:
-            source = news.get('source', '未知')
-            published = news.get('published', '')
-            summary = news.get('ai_summary', '') or self._generate_simple_summary(news)
-            if len(summary) > 200:
-                summary = summary[:200] + '…'
-            link = news.get('link', '#')
+            source = str(news.get('source', '未知') or '未知')
+            published = str(news.get('published', '') or '')
+            summary = str(news.get('ai_summary', '') or self._generate_simple_summary(news))
+            if len(summary) > 150:
+                summary = summary[:150] + '…'
+            link = str(news.get('link', '#') or '#')
+            source_initial = escape(source[0]) if source else '新'
 
             items_html += f'''
-                <div class="news-item">
-                    <div class="avatar">{source[0]}</div>
-                    <div class="bubble">
-                        <div class="bubble-header">
-                            <span class="bubble-name">{source}</span>
-                            <span class="bubble-time">{published}</span>
+                <article class="brief-card">
+                    <div class="source-mark">{source_initial}</div>
+                    <div class="brief-content">
+                        <div class="brief-meta">
+                            <span class="brief-source">{escape(source)}</span>
+                            <span class="brief-time">{escape(published)}</span>
                         </div>
-                        <a href="{link}" target="_blank" rel="noopener">{summary}</a>
+                        <a class="brief-summary" href="{escape(link, quote=True)}" target="_blank" rel="noopener">{escape(summary)}</a>
                     </div>
-                </div>'''
+                </article>'''
 
         tz = timezone(timedelta(hours=8))
         now = datetime.now(tz)
@@ -129,32 +131,46 @@ class NewsletterGenerator:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{title}</title>
+    <title>{escape(title)}</title>
     <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: #f0f2f5; color: #333; line-height: 1.6; }}
-        .container {{ max-width: 480px; margin: 0 auto; padding: 0; background: #f0f2f5; min-height: 100vh; }}
-        header {{ background: linear-gradient(135deg, #ff9a9e 0%, #fad0c4 100%); color: #fff; padding: 20px 16px; margin-bottom: 12px; }}
-        header h1 {{ font-size: 18px; margin-bottom: 4px; }}
-        header .date {{ font-size: 12px; opacity: 0.85; }}
-        .news-item {{ display: flex; align-items: flex-start; padding: 8px 12px; gap: 10px; }}
-        .avatar {{ width: 36px; height: 36px; border-radius: 50%; background: #6c5ce7; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: bold; flex-shrink: 0; }}
-        .bubble {{ background: #fff; border-radius: 0 12px 12px 12px; padding: 10px 14px; max-width: calc(100% - 48px); box-shadow: 0 1px 2px rgba(0,0,0,0.06); }}
-        .bubble-name {{ font-size: 12px; color: #6c5ce7; font-weight: 600; }}
-        .bubble-time {{ font-size: 11px; color: #aaa; margin-left: 8px; }}
-        .bubble-header {{ margin-bottom: 4px; }}
-        .bubble a {{ color: #333; text-decoration: none; font-size: 14px; line-height: 1.55; }}
-        .bubble a:hover {{ color: #6c5ce7; }}
-        footer {{ text-align: center; padding: 16px; font-size: 11px; color: #bbb; }}
+        :root {{ color-scheme: light; }}
+        * {{ box-sizing: border-box; }}
+        body {{ margin: 0; background: #e9edf2; color: #172236; font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif; }}
+        .container {{ width: min(100%, 540px); min-height: 100vh; margin: 0 auto; background: #f8fafc; padding-bottom: 28px; }}
+        header {{ background: #234a70; color: #ffffff; padding: 30px 28px 26px; border-bottom: 6px solid #e6b25c; }}
+        .eyebrow {{ display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 14px; font-weight: 700; letter-spacing: 0; color: #d9e8f6; }}
+        .eyebrow::before {{ content: ""; width: 9px; height: 9px; border-radius: 50%; background: #e6b25c; }}
+        header h1 {{ margin: 0; font-size: 27px; line-height: 1.3; letter-spacing: 0; }}
+        header .date {{ margin-top: 10px; font-size: 15px; line-height: 1.5; color: #d9e8f6; }}
+        main {{ padding: 18px 16px 0; }}
+        .brief-card {{ display: flex; align-items: flex-start; gap: 12px; padding: 16px 0; border-bottom: 1px solid #d8e0e8; }}
+        .brief-card:last-child {{ border-bottom: 0; }}
+        .source-mark {{ display: flex; align-items: center; justify-content: center; width: 42px; height: 42px; flex: 0 0 42px; border-radius: 8px; background: #dce9f4; color: #234a70; font-size: 19px; font-weight: 800; }}
+        .brief-content {{ min-width: 0; flex: 1; }}
+        .brief-meta {{ display: flex; align-items: baseline; gap: 9px; margin-bottom: 8px; }}
+        .brief-source {{ color: #234a70; font-size: 17px; font-weight: 750; }}
+        .brief-time {{ color: #697789; font-size: 13px; white-space: nowrap; }}
+        .brief-summary {{ display: block; color: #172236; font-size: 20px; font-weight: 550; line-height: 1.68; letter-spacing: 0; text-decoration: none; }}
+        .brief-summary:hover {{ color: #1d5c93; }}
+        footer {{ margin: 22px 16px 0; padding-top: 16px; border-top: 1px solid #d8e0e8; text-align: center; color: #7d8998; font-size: 13px; }}
+        @media (max-width: 390px) {{
+            header {{ padding: 26px 20px 22px; }}
+            header h1 {{ font-size: 25px; }}
+            main {{ padding: 14px 14px 0; }}
+            .brief-summary {{ font-size: 19px; }}
+        }}
     </style>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>{title}</h1>
-            <div class="date">{now.strftime("%Y-%m-%d %H:%M")} (UTC+8) | 共 {total_count} 条</div>
+            <div class="eyebrow">NEWSFLOW DAILY BRIEF</div>
+            <h1>{escape(title)}</h1>
+            <div class="date">{now.strftime("%Y-%m-%d %H:%M")} (UTC+8) · 共 {total_count} 条精选</div>
         </header>
-        {items_html}
+        <main data-news-count="{total_count}">
+            {items_html}
+        </main>
         <footer>由每日新闻流系统自动生成</footer>
     </div>
 </body>

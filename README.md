@@ -70,6 +70,11 @@ python main.py web --port 8000
 # 访问 http://127.0.0.1:8000
 ```
 
+启动 Web 服务后，AstrBot 插件会通过 `http://host.docker.internal:8000/api/render/newsletter`
+调用本机 Chrome，将简报稳定渲染为高清 PNG。该服务只监听本机回环地址，不对局域网开放。
+
+> 安全提示：`api_config.env` 仅存放在本机，已被 Git 忽略。不要将 API 密钥、SMTP 授权码、AstrBot 会话配置或数据库提交到 GitHub。
+
 ## 命令行操作
 
 | 命令 | 描述 |
@@ -150,6 +155,10 @@ src/
 └── config/       # 配置管理
 ```
 
+## 架构与维护
+
+NewsFlow 同时提供独立服务和 AstrBot 插件适配，两者复用同一套新闻采集、筛选、存储与简报生成核心。当前的运行目录、推荐的单一源码策略、GitHub 分发方式与热重载边界见 [`docs/architecture.md`](docs/architecture.md)。
+
 ## 常见问题
 
 1. **PowerShell 无法激活虚拟环境** — 运行 `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser` 允许脚本执行，或使用方式3直接运行
@@ -181,3 +190,52 @@ src/
 - 简报格式改为来源+时间+AI摘要的消息流风格
 - 新增 HTTP 代理支持
 - 新增 start.bat / setup_autostart.bat
+
+## AstrBot 插件（Docker 部署）
+
+NewsFlow 同时以 **AstrBot 插件** 形态提供，随 AstrBot 的 Docker 容器运行，支持 QQ/Telegram 等平台通过聊天命令获取简报。
+
+### 安装
+
+当前运行中的插件目录为 `F:\AstrBot\data\plugins\astrbot_plugin_newsflow\`。该目录已作为独立插件 Git 仓库初始化，同时也是 AstrBot 官方约定的部署目录。NewsFlow 核心与插件适配层按职责分仓维护，不存在需要复制同步的同一份插件代码。详见 [`docs/architecture.md`](docs/architecture.md)。
+
+### 配置
+
+在 AstrBot WebUI 的"插件配置"中填写以下必填项：
+
+| 配置项 | 必填 | 说明 |
+|--------|------|------|
+| `ai_api_key` | ✅ | AI API 密钥（DeepSeek 等） |
+| `ai_provider` | ❌ | 默认 `deepseek` |
+| `http_proxy` | ❌ | 海外 RSS 采集代理 |
+| `cron_expression` | ❌ | 默认 `0 6 * * *`（每日 6:00） |
+| `target_sessions` | ❌ | Cron 自动推送的目标群/会话 |
+| `render_service_url` | ❌ | 本地高清图片渲染服务，Docker 默认 `http://host.docker.internal:8000/api/render/newsletter` |
+
+`target_sessions` 的会话候选由 AstrBot 的会话历史动态提供。进入插件详情页的「控制台」→「推送」，在目标群或私聊先向机器人发送一条消息，再刷新并多选目标会话后保存。AstrBot 4.24.5 的标准插件配置页不提供动态会话选择器，配置页中的该字段保留为手动 UMO 录入入口。
+
+### 命令
+
+在聊天窗口发送：
+
+```
+/简报              → 今日简报（本机 Chrome 渲染为高清 PNG）
+/简报 2026-05-19   → 指定日期简报（本机 Chrome 渲染为高清 PNG）
+/简报 状态          → 系统状态（新闻数、AI 连接等）
+/简报 运行          → 手动触发流水线（约 3-5 分钟）
+```
+
+### Docker 注意事项
+
+- **新闻采集约 3-5 分钟**：通过 `asyncio.to_thread` 在后台线程执行，不阻塞消息收发
+- **容器关闭**：正在执行的采集线程将被操作系统终止，SQLite 的 WAL 模式保证数据不会损坏
+- **数据持久化**：`compose.yml` 已将宿主机 `./data` 挂载至容器 `/AstrBot/data`，插件数据存储在 `data/plugin_data/newsflow/`，重建容器不会丢失
+- **本地渲染服务**：发送图片或执行定时推送前，需保持 NewsFlow Web 服务在宿主机 `127.0.0.1:8000` 运行；插件不再调用 AstrBot 的远程 HTML 转图片服务
+- **插件重载**：修改插件 Python、`metadata.yaml` 或 `_conf_schema.json` 后，可在 AstrBot WebUI 的插件菜单执行「重载插件」，无需重启整个 AstrBot。修改 `pages/dashboard/` 下的已有静态资源后刷新页面即可。
+- **核心代码变更**：当前插件以 `src.*` 顶层模块导入 `/NewsFlow` 核心代码，AstrBot 的插件重载不会清除这部分模块缓存；修改 `src/` 后仍需要重启 AstrBot，或按 [`docs/architecture.md`](docs/architecture.md) 的目标架构完成模块归属收敛后再消除该限制。
+
+### Git 归档
+
+- 核心应用归档：`https://github.com/Shuyuxu211/NewsFlow`
+- AstrBot 适配层归档：独立公开仓库 `astrbot_plugin_newsflow`。它仅用于配套部署和版本留档，依赖本机 `/NewsFlow` 挂载与 Chrome 渲染服务，不能单独通过 AstrBot 安装。
+- 两个仓库不包含 `api_config.env`、数据库、简报输出、AstrBot 运行数据、API 密钥、SMTP 凭据或本地代理配置。

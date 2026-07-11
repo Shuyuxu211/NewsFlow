@@ -14,6 +14,7 @@ env/
 # Environment Variables (含 API Keys)
 *.env
 !.env.example
+api_config.env
 
 # Database
 data/*.db
@@ -41,3 +42,10 @@ logs/
 *.tmp
 *.bak
 _git_*.txt
+
+# Local AI/editor instructions and one-off investigation artifacts
+AGENTS.md
+AI_CONTEXT.md
+.kilo/
+plans/
+diagnose_startup.bat
