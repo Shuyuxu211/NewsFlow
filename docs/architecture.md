@@ -6,8 +6,8 @@ NewsFlow 不是两套独立的新闻业务程序，而是一个新闻核心加�
 
 | 组件 | 实际位置 | 职责 | 版本控制状态 |
 | --- | --- | --- | --- |
-| NewsFlow 核心 | `F:\Project\NewsFlow` | 采集、筛选、SQLite 存储、简报生成、FastAPI 控制台、本地 Chrome 图片渲染 | 独立 Git 仓库：`Shuyuxu211/NewsFlow` |
-| AstrBot 插件适配层 | `F:\AstrBot\data\plugins\astrbot_plugin_newsflow` | 聊天命令、Cron 主动推送、Plugin Page、AstrBot 配置与消息发送 | 独立 Git 仓库，同时是 AstrBot 的插件部署目录 |
+| NewsFlow 核心 | `F:\Project\NewsFlow` | 采集、筛选、SQLite 存储、简报生成、FastAPI 控制台、本地 Chrome 图片渲染 | [Shuyuxu211/NewsFlow](https://github.com/Shuyuxu211/NewsFlow) |
+| AstrBot 插件适配层 | `F:\AstrBot\data\plugins\astrbot_plugin_newsflow` | 聊天命令、Cron 主动推送、Plugin Page、AstrBot 配置与消息发送 | [Shuyuxu211/astrbot_plugin_newsflow](https://github.com/Shuyuxu211/astrbot_plugin_newsflow)，同时是插件部署目录 |
 | AstrBot 运行时 | Docker 容器 `astrbot` | 加载插件、保存会话/插件配置、提供 WebUI 与消息平台连接 | AstrBot 官方仓库/镜像 |
 
 Docker 将 `F:\Project\NewsFlow` 挂载到容器 `/NewsFlow`。插件通过该挂载导入 `src.*`；本机的 `127.0.0.1:8000` FastAPI 服务通过 `host.docker.internal:8000` 给插件提供 Chrome 图片渲染端点。
