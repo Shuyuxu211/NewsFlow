@@ -44,6 +44,8 @@ AstrBot 的 GitHub 安装器只能下载整个 GitHub 仓库或一个分支，�
 | `pages/dashboard/*.html`、`*.css`、`*.js` | 刷新 Plugin Page | 否 |
 | 插件的 `main.py`、插件内部模块、`metadata.yaml`、`_conf_schema.json` | WebUI 插件菜单选择「重载插件」 | 否 |
 | `requirements.txt` | 确认依赖已安装后重载插件 | 通常否；依赖安装或加载失败时按错误处理 |
+| Cron 主动推送 | 使用 `MessageChain` 包装文本和图片组件 | 否；AstrBot 4.26.5 的 `Context.send_message()` 不接受裸组件列表 |
+| 已生成但未送达的今日简报 | Plugin Page「简报」点击「补发今日简报」 | 否；复用 Cron 的本地渲染和主动消息发送链路 |
 | 当前 `F:\Project\NewsFlow\src\*.py` | 重启 AstrBot 容器 | 是，当前顶层模块缓存不会由插件重载清除 |
 | `src/web/app.py` | 重启宿主机 NewsFlow Web 服务 | 是，仅重启该服务即可 |
 

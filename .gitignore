@@ -49,3 +49,4 @@ AI_CONTEXT.md
 .kilo/
 plans/
 diagnose_startup.bat
+.playwright-mcp/
