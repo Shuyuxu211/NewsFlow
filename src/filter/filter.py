@@ -4,6 +4,7 @@ import re
 import time
 import asyncio
 from typing import List, Dict, Any, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from src.config.config import settings
 from src.storage.storage import NewsStorage
 import logging
@@ -15,7 +16,7 @@ DEFAULT_EXCLUDE_KEYWORDS = [
     # 付费墙标记
     '专享', '解锁', '研选', 'VIP', 'vip', '付费', '订阅', '会员专享',
     # 聚合/复盘/观点类
-    'T早报', '早报', '快讯集锦', '收盘', '复盘', '观点文章', '深度分析',
+    'T早报', '早报', '早知道', '快讯集锦', '收盘', '复盘', '观点文章', '深度分析',
     # 展会/旅游/乡村/农事
     '消博', '博览会', '旅游', '茶山', '振兴', '农事', '乡村', '县域经济',
     # 城市宣传/风光/摄影
@@ -36,52 +37,43 @@ DEFAULT_EXCLUDE_KEYWORDS = [
 
 logger = logging.getLogger(__name__)
 
-FILTER_SYSTEM_PROMPT = """你是一个新闻筛选助手，为关注全球局势和市场动态的读者筛选有价值的新闻。
+FILTER_SYSTEM_PROMPT = """你是面向金融市场、宏观研究和产业研究读者的新闻晨报主编。你的目标不是挑选最轰动的新闻，而是在有限版面内形成均衡、可决策的新闻组合。
 
-【需要排除的内容——这些不是新闻】
-1. 礼节性访问/会见：如"某某会见某某""某某访问某地"，无实质性政策或合作声明
-2. 视察调研类：如"领导视察某村/某企业/某工厂"
-3. 农事/丰收/乡村振兴：如"春耕""秋收""乡村新貌""县域经济"
-4. 城市宣传/旅游推广：如"某地举办文化节""旅游旺季""城市名片"
-5. 人物特写/好人好事/劳模表彰
-6. 革命历史/红色故事/纪念活动
-7. 纯表态性报道：只写"某某表示/强调/指出"但无具体政策、数据、行动
-8. 学校招生/开学/毕业典礼
-9. 体育比赛/娱乐八卦/明星绯闻
-10. 重复通报：同一事件的多个版本只保留最有信息量的一条
+【核心范围】
+1. 宏观数据与政策监管：经济数据、货币财政政策、贸易与金融监管
+2. 财经市场：利率、汇率、股票、债券、商品、银行和资本市场
+3. 产业与公司：产能、供应链、并购、业绩、融资、重大管理层和商业模式变化
+4. 科技创新：AI、半导体、软件、通信、生物科技、能源技术、汽车和航天
+5. 地缘政治仅作辅助：只有重大升级，或能通过能源、航运、制裁、供应链、通胀、汇率、利率等渠道影响市场时才高分
 
-【需要保留的内容——这些是真正的新闻】
-1. 具体数据：如"GDP增长X%""出口额X亿""降息X个基点"
-2. 具体行动/政策：如"出台X法规""制裁X国""批准X项目"
-3. 冲突/战争/制裁进展：如"袭击X货船""停火协议破裂"
-4. 国际关系实质性变化：如"签署X协议""X国加入X组织"
-5. 重大经济数据/市场变化：如"油价涨X%""汇率破X"
-6. 监管/立法/政策文件：如"发布X新规""修订X法律"
-7. 科技突破：如"发布X芯片""X技术取得突破"
-8. 公司重大事件：如"IPO""并购""高管变动""业绩暴雷"
-9. 自然灾害/事故：如"地震X级""航班取消"
-10. 严肃国际媒体报道的地缘政治/经济/科技新闻
+【必须降级或排除】
+1. 礼节性访问、视察调研、宣传通稿、人物特写、纪念活动
+2. 纯表态、纯观点或没有新数据和新行动的分析文章
+3. 同一长期冲突的重复战况、口头威胁、采访角度和实时滚动更新；必须说明相对前序报道新增了什么
+4. 普通战况更新若没有重大升级或明确市场传导，最高不超过5分
+5. 体育、娱乐、社会软闻以及与市场无明显关系的事故和环境议题
+6. 国内政治人事、确认听证、忠诚度争议和一般司法案件，若未改变监管、财政、贸易或产业政策，应排除
+7. AI滥用个案只有形成平台责任、监管先例或重大公司风险时才进入核心版面
 
-【评分标准】
-- 10分：直接改变市场格局的重大事件（战争、制裁、央行大幅降息/加息）
-- 8-9分：重大政策/数据发布、地缘风险升级、科技突破
-- 6-7分：有信号意义的政策动向、行业趋势变化、中等影响事件
-- 4-5分：信息增量有限但有参考价值的事件
-- 1-3分：上述排除类内容、无实质信息的报道
+【评分维度】
+- 市场/经济/产业实际影响：30%
+- 相对近期报道的信息增量：25%
+- 对决策者的相关性：20%
+- 数据与行动的具体程度：10%
+- 来源可靠性和原创程度：10%
+- 时效性：5%
 
-【summary要求】
-一句话摘要，包含"什么+怎么样+影响"，约30-50字。例如：
-- "美伊紧张局势升级，美军袭击伊朗货船，黄金受挫美元走强，市场避险情绪上升"
-- "4月16日美联储宣布降息25个基点，美元走弱，科技股受提振"
-- "证监会发布创业板第四套上市标准，要求企业营收不低于1亿元且研发投入超8%"
+【分类枚举】
+只允许：政策监管、财经市场、科技产业、国际局势、其他。
+其中产业与公司新闻归入“科技产业”；石油、天然气、航运和大宗商品的合作、供给与价格变化优先归入“财经市场”或“科技产业”，只有战争或外交升级本身才归入“国际局势”。
 
-请严格按JSON格式返回：
-{
-  "results": {
-    "0": { "keep": 1, "score": 8, "reason": "...", "summary": "核心事实+具体影响" },
-    "1": { "keep": 0, "score": 2, "reason": "礼节性访问，无实质信息" }
-  }
-}"""
+【标识要求】
+- story_key：同一长期故事必须使用稳定、宽口径的短标识，例如同一战争、同一贸易争端、同一央行政策周期
+- event_key：同一具体事件必须使用稳定、窄口径的短标识
+- 不要因来源是国际大媒体而自动提高分数
+- summary只概括原文事实；若市场影响是推断，使用“可能”而不是写成既成事实
+
+请严格返回JSON，不要输出额外文字。"""
 
 
 def _extract_json(text: str) -> Optional[dict]:
@@ -154,7 +146,7 @@ class AIClient:
         elif self.provider == 'deepseek':
             self.request_delay = 0.5
             self.max_retries = 3
-            self.batch_size = 20
+            self.batch_size = 10
         else:
             self.request_delay = 2
             self.max_retries = 3
@@ -231,8 +223,17 @@ class AIClient:
                     start_time = time.time()
                     response = client.chat.completions.create(**kwargs)
                     elapsed = time.time() - start_time
-                    logger.info(f"API 响应时间: {elapsed:.2f}秒")
-                    content = response.choices[0].message.content
+                    choice = response.choices[0]
+                    content = choice.message.content
+                    finish_reason = getattr(choice, 'finish_reason', '') or ''
+                    usage = getattr(response, 'usage', None)
+                    completion_tokens = getattr(usage, 'completion_tokens', None) if usage else None
+                    logger.info(
+                        f"API 响应时间: {elapsed:.2f}秒, finish_reason={finish_reason or 'unknown'}, "
+                        f"响应字符={len(content or '')}, completion_tokens={completion_tokens if completion_tokens is not None else 'unknown'}"
+                    )
+                    if finish_reason == 'length':
+                        logger.warning("AI 响应达到输出长度上限，当前批次可能需要拆分重试")
                     if self.provider == 'qwen':
                         if not content:
                             content = getattr(response.choices[0].message, 'reasoning_content', None) or ''
@@ -315,6 +316,140 @@ class AIFilter:
             priorities[source['name']] = source.get('priority', 1)
         return priorities
 
+    def _candidate_pool_size(self, max_news: int) -> int:
+        multiplier = max(int(settings.filter_settings.get('candidate_pool_multiplier', 3)), 1)
+        return max_news * multiplier
+
+    @staticmethod
+    def _candidate_identity(news: Dict[str, Any]) -> Any:
+        return news.get('id') or news.get('link') or id(news)
+
+    def _candidate_rank(self, news: Dict[str, Any]) -> tuple:
+        return (
+            float(news.get('relevance_score', 0) or 0),
+            float(news.get('novelty_score', 0) or 0),
+            float(news.get('impact_score', 0) or 0),
+            self.source_priorities.get(news.get('source', ''), 1),
+        )
+
+    def _unique_candidates(self, news_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        result = []
+        seen = set()
+        for news in news_list:
+            identity = self._candidate_identity(news)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            result.append(news)
+        return result
+
+    @staticmethod
+    def _normalize_topic(topic: str) -> str:
+        aliases = {
+            '宏观政策': '政策监管', '政策监管': '政策监管', '宏观数据': '政策监管',
+            '财经市场': '财经市场', '金融市场': '财经市场',
+            '科技产业': '科技产业', '产业公司': '科技产业', '科技创新': '科技产业',
+            '国际局势': '国际局势', '地缘政治': '国际局势',
+            '其他': '其他', '非核心': '其他',
+        }
+        return aliases.get(str(topic or '').strip(), '')
+
+    @staticmethod
+    def _contains_keyword(text: str, keyword: str) -> bool:
+        keyword = keyword.lower()
+        if re.fullmatch(r'[a-z0-9 ]+', keyword):
+            return re.search(rf'(?<![a-z0-9]){re.escape(keyword)}(?![a-z0-9])', text) is not None
+        return keyword in text
+
+    def _infer_topic(self, news: Dict[str, Any]) -> str:
+        text = (news.get('title', '') + ' ' + (news.get('ai_summary', '') or news.get('summary', '') or '')).lower()
+        topic_keywords = {
+            '政策监管': [
+                'gdp', 'cpi', 'pmi', '就业', '失业', '消费', '出口', '进口', '经济增长',
+                '政策', '监管', '央行', '美联储', '降息', '加息', '利率', '财政', '预算',
+                '税收', '法规', '立法', '关税', '贸易规则', '审批', '审查', 'fed',
+                'regulation', 'monetary policy', 'fiscal policy', 'tariff'
+            ],
+            '财经市场': [
+                '股市', '指数', '期货', '油价', '汇率', '美元', '黄金', '债券', '收益率',
+                '通胀', 'ipo', '信用评级', '银行', '基金', 'stock market', 'bond', 'yield',
+                'oil price', 'foreign exchange', 'inflation', 'credit rating'
+            ],
+            '科技产业': [
+                '芯片', '半导体', '人工智能', '科技', '产能', '供应链', '并购', '收购',
+                '重组', '业绩', '营收', '利润', '融资', 'ceo', '公司', '企业', '制造',
+                '汽车', '电动车', '新能源', '电池', '能源', '航天', '医药', '生物科技',
+                'chip', 'semiconductor', 'artificial intelligence', 'technology', 'capacity',
+                'supply chain', 'merger', 'acquisition', 'earnings', 'revenue', 'automotive',
+                'electric vehicle', 'biotech', 'aerospace'
+            ],
+            '国际局势': [
+                '战争', '冲突', '制裁', '停火', '军事', '袭击', '导弹', '货船', '伊朗',
+                '以色列', '乌克兰', '俄罗斯', '中东', '台海', '南海', '美军', '北约',
+                'war', 'conflict', 'sanction', 'ceasefire', 'military', 'attack', 'strike',
+                'iran', 'israel', 'ukraine', 'russia', 'middle east'
+            ],
+        }
+        for topic in ('政策监管', '财经市场', '科技产业', '国际局势'):
+            if any(self._contains_keyword(text, kw) for kw in topic_keywords[topic]):
+                return topic
+        return '其他'
+
+    @staticmethod
+    def _normalize_key(value: str) -> str:
+        value = re.sub(r'[^a-z0-9一-鿿_-]+', '-', str(value or '').lower()).strip('-')
+        return value[:100]
+
+    @staticmethod
+    def _normalize_link(value: str) -> str:
+        link = str(value or '').strip()
+        if not link:
+            return ''
+        try:
+            parts = urlsplit(link)
+            scheme = (parts.scheme or 'https').lower()
+            netloc = parts.netloc.lower()
+            if netloc.startswith('www.'):
+                netloc = netloc[4:]
+            path = re.sub(r'/+', '/', parts.path or '/').rstrip('/') or '/'
+            tracking_keys = {
+                'at_campaign', 'at_medium', 'fbclid', 'gclid', 'output',
+                'ref', 'traffic_source', 'mc_cid', 'mc_eid',
+            }
+            query_items = [
+                (key, item_value)
+                for key, item_value in parse_qsl(parts.query, keep_blank_values=True)
+                if not key.lower().startswith('utm_') and key.lower() not in tracking_keys
+            ]
+            query = urlencode(sorted(query_items))
+            return urlunsplit((scheme, netloc, path, query, ''))
+        except Exception:
+            return link.lower().rstrip('/')
+
+    def _known_story_cluster(self, news: Dict[str, Any]) -> str:
+        text = (news.get('title', '') + ' ' + (news.get('ai_summary', '') or news.get('summary', '') or '')).lower()
+        clusters = [
+            ('iran-conflict', ['伊朗', '美伊', '霍尔木兹', 'iran', 'hormuz']),
+            ('israel-gaza', ['加沙', '哈马斯', 'gaza', 'hamas']),
+            ('russia-ukraine', ['俄乌', '乌克兰', 'ukraine']),
+            ('china-us-trade', ['中美贸易', '中美经贸', 'us-china trade', 'china-us trade']),
+            ('taiwan-strait', ['台海', '对台军售', 'taiwan strait', 'taiwan arms']),
+        ]
+        for key, aliases in clusters:
+            if any(alias in text for alias in aliases):
+                return key
+        return ''
+
+    def _derive_story_key(self, news: Dict[str, Any], suggested: str = '') -> str:
+        known = self._known_story_cluster(news)
+        if known:
+            return known
+        normalized = self._normalize_key(suggested)
+        if normalized:
+            return normalized
+        event_key = news.get('event_key') or self._generate_event_fingerprint(news)
+        return self._normalize_key(event_key) or self._normalize_key(news.get('title', ''))
+
     def _generate_event_fingerprint(self, news: Dict[str, Any]) -> str:
         title = news.get('title', '')
         summary = (news.get('ai_summary', '') or news.get('summary', '') or '')[:200]
@@ -363,7 +498,9 @@ class AIFilter:
                 dt = dateutil.parser.parse(str(pub))
                 if dt.tzinfo is None:
                     cat = news.get('category', '')
-                    if cat == '英文':
+                    if news.get('_published_timezone') == 'Asia/Shanghai':
+                        dt = dt.replace(tzinfo=tz_cn)
+                    elif cat == '英文':
                         dt = dt.replace(tzinfo=timezone.utc)
                     else:
                         dt = dt.replace(tzinfo=tz_cn)
@@ -385,29 +522,35 @@ class AIFilter:
         if not news_list:
             return []
 
-        news_list = self._filter_by_date(news_list)
-
+        dated_news = self._filter_by_date(news_list)
         rules = self._load_filter_rules()
+        if not dated_news:
+            return []
 
         if not self.client.is_configured():
-            logger.warning("未配置 AI API Key，使用关键词筛选模式")
-            return self._keyword_filter(news_list, rules)
+            logger.warning("未配置 AI API Key，使用统一关键词评估与组合选稿")
+            coarse_filtered = self._coarse_filter(dated_news, rules)
+            candidates = self._keyword_filter(coarse_filtered, rules)
+            return self._finalize_candidates(candidates, [], rules.get('max_news', 20), use_ai_dedup=False)
 
-        return self._two_round_filter(news_list, rules)
+        return self._two_round_filter(dated_news, rules)
 
     async def filter_news_async(self, news_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not news_list:
             return []
 
-        news_list = self._filter_by_date(news_list)
-
+        dated_news = self._filter_by_date(news_list)
         rules = self._load_filter_rules()
+        if not dated_news:
+            return []
 
         if not self.client.is_configured():
-            logger.warning("未配置 AI API Key，使用关键词筛选模式")
-            return self._keyword_filter(news_list, rules)
+            logger.warning("未配置 AI API Key，使用统一关键词评估与组合选稿")
+            coarse_filtered = self._coarse_filter(dated_news, rules)
+            candidates = self._keyword_filter(coarse_filtered, rules)
+            return self._finalize_candidates(candidates, [], rules.get('max_news', 20), use_ai_dedup=False)
 
-        return await self._two_round_filter_async(news_list, rules)
+        return await self._two_round_filter_async(dated_news, rules)
 
     def _load_filter_rules(self) -> Dict[str, Any]:
         rules = {
@@ -459,86 +602,40 @@ class AIFilter:
         return rules
 
     def _keyword_filter(self, news_list: List[Dict[str, Any]], rules: Dict[str, Any]) -> List[Dict[str, Any]]:
-        keyword_exclude = DEFAULT_EXCLUDE_KEYWORDS
+        eligible_news = self._coarse_filter(news_list, rules)
+        candidates = []
+        include_rules = rules.get('include', [])
 
-        filtered = []
-
-        for news in news_list:
+        for news in eligible_news:
             title = news.get('title', '')
             summary = news.get('summary', '') or ''
             text = f"{title} {summary}".lower()
-
-            excluded = False
-            for rule in rules.get('exclude', []):
-                if rule['value'].lower() in text:
-                    excluded = True
-                    break
-            if excluded:
+            score = sum(
+                rule.get('priority', 1)
+                for rule in include_rules
+                if str(rule.get('value', '')).lower() in text
+            )
+            if score <= 0:
                 continue
 
-            for kw in keyword_exclude:
-                if kw.lower() in text:
-                    excluded = True
-                    break
-            if excluded:
-                continue
+            news['relevance_score'] = max(float(news.get('relevance_score', 0) or 0), float(score))
+            news['impact_score'] = float(news.get('impact_score', score) or score)
+            news['novelty_score'] = float(news.get('novelty_score', score) or score)
+            news['topic'] = self._normalize_topic(news.get('topic', '')) or self._infer_topic(news)
+            news['event_key'] = self._normalize_key(news.get('event_key', '')) or self._normalize_key(
+                self._generate_event_fingerprint(news)
+            )
+            news['story_key'] = self._derive_story_key(news, news.get('story_key', ''))
+            news['filter_reason'] = news.get('filter_reason', '') or '关键词规则命中'
+            if not news.get('ai_summary'):
+                news['ai_summary'] = self._generate_simple_summary(news)
+            candidates.append(news)
 
-            score = 0
-            for rule in rules.get('include', []):
-                if rule['value'].lower() in text:
-                    score += rule.get('priority', 1)
-
-            if score > 0:
-                news['relevance_score'] = score
-                if not news.get('ai_summary'):
-                    news['ai_summary'] = self._generate_simple_summary(news)
-                filtered.append(news)
-
-        filtered.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
-        max_news = rules.get('max_news', 20)
-
-        if len(filtered) < 5:
-            logger.warning(f"关键词筛选结果不足({len(filtered)}条)，放宽条件补充")
-            existing = {id(n) for n in filtered}
-            for news in news_list:
-                if id(news) in existing:
-                    continue
-                news['relevance_score'] = 1
-                if not news.get('ai_summary'):
-                    news['ai_summary'] = self._generate_simple_summary(news)
-                filtered.append(news)
-                existing.add(id(news))
-                if len(filtered) >= max_news:
-                    break
-
-        filtered.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
-        result = self._ensure_source_diversity(filtered, max_news)
-
-        # 国内源保底：关键词降级模式也确保财经源不低于 2 条（排除新华社）
-        domestic_sources = {'财联社', '财经杂志', '财新网'}
-        min_domestic = min(2, max_news // 10)  # 至少 2 条
-        if len(result) < max_news:
-            domestic_in_result = [n for n in result if n.get('source') in domestic_sources]
-            if len(domestic_in_result) < min_domestic:
-                logger.info(f"关键词筛选财经源不足({len(domestic_in_result)}条 < {min_domestic})，补充")
-                existing_ids = {n.get('id') or n.get('link') for n in result}
-                for n in news_list:
-                    if n.get('source') not in domestic_sources:
-                        continue
-                    if (n.get('id') or n.get('link')) in existing_ids:
-                        continue
-                    n['relevance_score'] = n.get('relevance_score', 1)
-                    if not n.get('ai_summary'):
-                        n['ai_summary'] = self._generate_simple_summary(n)
-                    n['filter_reason'] = '（财经源保底补充）'
-                    result.append(n)
-                    existing_ids.add(n.get('id') or n.get('link'))
-                    domestic_in_result.append(n)
-                    if len(domestic_in_result) >= min_domestic:
-                        break
-                logger.info(f"财经源补充后: {len(domestic_in_result)} 条")
-
-        return result
+        candidates = self._unique_candidates(candidates)
+        candidates.sort(key=self._candidate_rank, reverse=True)
+        limit = self._candidate_pool_size(rules.get('max_news', 20))
+        logger.info(f"关键词评估: {len(news_list)} -> {len(candidates[:limit])} 条候选")
+        return candidates[:limit]
 
     def _generate_simple_summary(self, news: Dict[str, Any]) -> str:
         summary = (news.get('summary', '') or '').strip()
@@ -558,251 +655,272 @@ class AIFilter:
 
         return summary[:60] + '...'
 
+    def _refill_after_dedup(
+        self,
+        deduplicated: List[Dict[str, Any]],
+        reserve: List[Dict[str, Any]],
+        max_news: int,
+    ) -> List[Dict[str, Any]]:
+        min_news = min(max(int(settings.filter_settings.get('min_news', max_news)), 1), max_news)
+        if len(deduplicated) >= min_news or not reserve:
+            return deduplicated
+
+        existing_ids = {item.get('id') or item.get('link') or id(item) for item in deduplicated}
+        reserve_pool = []
+        for news in reserve:
+            identity = news.get('id') or news.get('link') or id(news)
+            if identity in existing_ids:
+                continue
+            if not news.get('ai_summary'):
+                news['ai_summary'] = self._generate_simple_summary(news)
+            news['filter_reason'] = (news.get('filter_reason', '') + '（去重后备用候选补位）').strip()
+            reserve_pool.append(news)
+            existing_ids.add(identity)
+            if len(reserve_pool) >= self._candidate_pool_size(max_news):
+                break
+
+        if not reserve_pool:
+            return deduplicated
+
+        reserve_pool = self._event_deduplicate(reserve_pool)
+        combined = list(deduplicated)
+        seen_events = {self._normalize_key(item.get('event_key', '')) for item in combined}
+        seen_links = {self._normalize_link(item.get('link', '')) for item in combined}
+        seen_events.discard('')
+        seen_links.discard('')
+
+        def title_tokens(item: Dict[str, Any]) -> set:
+            return set(re.findall(r'[\u4e00-\u9fff]|[a-zA-Z]+|\d+', item.get('title', '').lower()))
+
+        seen_titles = [title_tokens(item) for item in combined if title_tokens(item)]
+        added = 0
+        for news in reserve_pool:
+            event_key = self._normalize_key(news.get('event_key', ''))
+            normalized_link = self._normalize_link(news.get('link', ''))
+            if event_key and event_key in seen_events:
+                continue
+            if normalized_link and normalized_link in seen_links:
+                continue
+
+            tokens = title_tokens(news)
+            is_title_duplicate = False
+            if tokens:
+                for existing_tokens in seen_titles:
+                    union = len(tokens | existing_tokens)
+                    if union and len(tokens & existing_tokens) / union > 0.6:
+                        is_title_duplicate = True
+                        break
+            if is_title_duplicate:
+                logger.info(f"备用候选标题去重-跳过: {news.get('title', '')[:40]}")
+                continue
+
+            combined.append(news)
+            added += 1
+            if event_key:
+                seen_events.add(event_key)
+            if normalized_link:
+                seen_links.add(normalized_link)
+            if tokens:
+                seen_titles.append(tokens)
+            if len(combined) >= max_news:
+                break
+
+        logger.info(
+            f"去重后补位: {len(deduplicated)} + {added} -> {len(combined)} 条"
+        )
+        return combined
+
+    def _finalize_candidates(
+        self,
+        candidates: List[Dict[str, Any]],
+        reserve: List[Dict[str, Any]],
+        max_news: int,
+        use_ai_dedup: bool,
+    ) -> List[Dict[str, Any]]:
+        candidates = self._unique_candidates(candidates)
+        reserve = self._unique_candidates(reserve)
+        logger.info(f"候选去重阶段: 主候选={len(candidates)}, 备用={len(reserve)}")
+
+        if use_ai_dedup and self.client.provider not in ('groq', 'qwen'):
+            deduplicated = self._deduplicate_similar(candidates)
+        else:
+            deduplicated = self._title_deduplicate(candidates)
+        deduplicated = self._event_deduplicate(deduplicated)
+        deduplicated = self._refill_after_dedup(deduplicated, reserve, max_news)
+
+        result = self._categorize_by_topic(deduplicated, max_news=max_news)
+        logger.info(f"统一组合选稿完成: {len(result)} 条新闻")
+        return result
+
+    async def _finalize_candidates_async(
+        self,
+        candidates: List[Dict[str, Any]],
+        reserve: List[Dict[str, Any]],
+        max_news: int,
+        use_ai_dedup: bool,
+    ) -> List[Dict[str, Any]]:
+        candidates = self._unique_candidates(candidates)
+        reserve = self._unique_candidates(reserve)
+        logger.info(f"候选去重阶段: 主候选={len(candidates)}, 备用={len(reserve)}")
+
+        if use_ai_dedup and self.client.provider not in ('groq', 'qwen'):
+            deduplicated = await self._deduplicate_similar_async(candidates)
+        else:
+            deduplicated = self._title_deduplicate(candidates)
+        deduplicated = self._event_deduplicate(deduplicated)
+        deduplicated = self._refill_after_dedup(deduplicated, reserve, max_news)
+
+        result = self._categorize_by_topic(deduplicated, max_news=max_news)
+        logger.info(f"统一组合选稿完成: {len(result)} 条新闻")
+        return result
+
     def _two_round_filter(self, news_list: List[Dict[str, Any]], rules: Dict[str, Any]) -> List[Dict[str, Any]]:
         max_news = rules.get('max_news', 20)
-
-        logger.info(f"第一轮粗筛: {len(news_list)} 条新闻")
+        logger.info(f"统一粗筛: {len(news_list)} 条新闻")
         coarse_filtered = self._coarse_filter(news_list, rules)
         logger.info(f"粗筛后: {len(coarse_filtered)} 条新闻")
 
-        logger.info(f"第二轮AI精筛: {len(coarse_filtered)} 条新闻")
-        ai_filtered = self._ai_semantic_filter(coarse_filtered)
-        logger.info(f"AI精筛后: {len(ai_filtered)} 条新闻")
-
-        fill_threshold = max(max_news // 2, 8)
-        if len(ai_filtered) < fill_threshold:
-            logger.warning(f"AI筛选结果不足({len(ai_filtered)}条 < {fill_threshold})，从粗筛结果补充")
-            existing_ids = {n.get('id') or n.get('link') for n in ai_filtered}
-            for n in coarse_filtered:
-                if (n.get('id') or n.get('link')) not in existing_ids:
-                    if not n.get('ai_summary'):
-                        n['ai_summary'] = self._generate_simple_summary(n)
-                    n['filter_reason'] = '（AI筛选不足，粗筛补充）'
-                    n['relevance_score'] = n.get('relevance_score', 5)
-                    ai_filtered.append(n)
-                    existing_ids.add(n.get('id') or n.get('link'))
-                if len(ai_filtered) >= max_news:
-                    break
-
-        logger.info(f"第三轮去重: {len(ai_filtered)} 条新闻")
-        if self.client.provider in ('groq', 'qwen'):
-            deduplicated = self._event_deduplicate(ai_filtered)
-            deduplicated = self._title_deduplicate(deduplicated)
-        else:
-            deduplicated = self._deduplicate_similar(ai_filtered)
-            deduplicated = self._event_deduplicate(deduplicated)
-        logger.info(f"去重后: {len(deduplicated)} 条新闻")
-
-        result = self._categorize_by_topic(deduplicated)
-        logger.info(f"分类配额后: {len(result)} 条新闻")
-
-        # 国内源保底：仅针对财经类源（排除新华社），确保有少量中文财经内容
-        domestic_sources = {'财联社', '财经杂志', '财新网'}
-        min_domestic = min(2, max_news // 8)  # max_news=20 → 2条
-        if len(result) < max_news and coarse_filtered:
-            domestic_in_result = [n for n in result if n.get('source') in domestic_sources]
-            if len(domestic_in_result) < min_domestic:
-                logger.info(f"财经源不足({len(domestic_in_result)}条 < {min_domestic})，从粗筛结果补充")
-                existing_ids = {n.get('id') or n.get('link') for n in result}
-                for n in coarse_filtered:
-                    if n.get('source') not in domestic_sources:
-                        continue
-                    if (n.get('id') or n.get('link')) in existing_ids:
-                        continue
-                    if not n.get('ai_summary'):
-                        n['ai_summary'] = self._generate_simple_summary(n)
-                    n['filter_reason'] = '（财经源保底补充）'
-                    n['relevance_score'] = n.get('relevance_score', 5)
-                    n['topic'] = '其他'
-                    result.append(n)
-                    existing_ids.add(n.get('id') or n.get('link'))
-                    domestic_in_result.append(n)
-                    if len(domestic_in_result) >= min_domestic:
-                        break
-                logger.info(f"财经源补充后: {len(domestic_in_result)} 条, 共{len(result)}条")
-
-        return result
+        candidates, reserve = self._ai_semantic_filter(coarse_filtered, rules)
+        logger.info(f"AI评估后: 主候选={len(candidates)}, 备用={len(reserve)}")
+        return self._finalize_candidates(candidates, reserve, max_news, use_ai_dedup=True)
 
     async def _two_round_filter_async(self, news_list: List[Dict[str, Any]], rules: Dict[str, Any]) -> List[Dict[str, Any]]:
         max_news = rules.get('max_news', 20)
-
-        logger.info(f"第一轮粗筛: {len(news_list)} 条新闻")
+        logger.info(f"统一粗筛: {len(news_list)} 条新闻")
         coarse_filtered = self._coarse_filter(news_list, rules)
         logger.info(f"粗筛后: {len(coarse_filtered)} 条新闻")
 
-        logger.info(f"第二轮AI精筛: {len(coarse_filtered)} 条新闻")
-        ai_filtered = await self._ai_semantic_filter_async(coarse_filtered)
-        logger.info(f"AI精筛后: {len(ai_filtered)} 条新闻")
+        candidates, reserve = await self._ai_semantic_filter_async(coarse_filtered, rules)
+        logger.info(f"AI评估后: 主候选={len(candidates)}, 备用={len(reserve)}")
+        return await self._finalize_candidates_async(candidates, reserve, max_news, use_ai_dedup=True)
 
-        fill_threshold = max(max_news // 2, 8)
-        if len(ai_filtered) < fill_threshold:
-            logger.warning(f"AI筛选结果不足({len(ai_filtered)}条 < {fill_threshold})，从粗筛结果补充")
-            existing_ids = {n.get('id') or n.get('link') for n in ai_filtered}
-            for n in coarse_filtered:
-                if (n.get('id') or n.get('link')) not in existing_ids:
-                    if not n.get('ai_summary'):
-                        n['ai_summary'] = self._generate_simple_summary(n)
-                    n['filter_reason'] = '（AI筛选不足，粗筛补充）'
-                    n['relevance_score'] = n.get('relevance_score', 5)
-                    ai_filtered.append(n)
-                    existing_ids.add(n.get('id') or n.get('link'))
-                if len(ai_filtered) >= max_news:
-                    break
+    def _build_dedup_prompt(self, news_list: List[Dict[str, Any]]) -> str:
+        news_items = []
+        for i, news in enumerate(news_list):
+            title = news.get('title', '')
+            summary = news.get('ai_summary', '') or (news.get('summary', '') or '')[:100]
+            score = news.get('relevance_score', 5)
+            news_items.append(f"[{i}] 标题: {title}\n摘要: {summary[:80]}\n评分: {score}")
 
-        logger.info(f"第三轮去重: {len(ai_filtered)} 条新闻")
-        if self.client.provider in ('groq', 'qwen'):
-            deduplicated = self._event_deduplicate(ai_filtered)
-            deduplicated = self._title_deduplicate(deduplicated)
-        else:
-            deduplicated = await self._deduplicate_similar_async(ai_filtered)
-            deduplicated = self._event_deduplicate(deduplicated)
-        logger.info(f"去重后: {len(deduplicated)} 条新闻")
+        return f"""请识别以下新闻中的重复/相似新闻，保留最重要的那条。
 
-        result = self._categorize_by_topic(deduplicated)
-        logger.info(f"分类配额后: {len(result)} 条新闻")
+判断标准：
+- 只有明确属于同一具体事件、同一公司同一动作或同一链接的不同报道，才视为重复
+- 不要因为行业、主题、数据类型或报道格式相似就合并；不同公司的业绩预告、回购、融资、产能和产品发布必须分别保留
+- 同一公司但发布时间、行动或具体数据不同，也不要仅凭标题相似合并，除非可以确认是同一事件更新
+- 保留评分最高的；如果评分相同，保留信息最完整的
+- 只有高置信度重复才移除，无法确认时保留全部条目
 
-        # 国内源保底：仅针对财经类源（排除新华社），确保有少量中文财经内容
-        domestic_sources = {'财联社', '财经杂志', '财新网'}
-        min_domestic = min(2, max_news // 8)  # max_news=20 → 2条
-        if len(result) < max_news and coarse_filtered:
-            domestic_in_result = [n for n in result if n.get('source') in domestic_sources]
-            if len(domestic_in_result) < min_domestic:
-                logger.info(f"财经源不足({len(domestic_in_result)}条 < {min_domestic})，从粗筛结果补充")
-                existing_ids = {n.get('id') or n.get('link') for n in result}
-                for n in coarse_filtered:
-                    if n.get('source') not in domestic_sources:
-                        continue
-                    if (n.get('id') or n.get('link')) in existing_ids:
-                        continue
-                    if not n.get('ai_summary'):
-                        n['ai_summary'] = self._generate_simple_summary(n)
-                    n['filter_reason'] = '（财经源保底补充）'
-                    n['relevance_score'] = n.get('relevance_score', 5)
-                    n['topic'] = '其他'
-                    result.append(n)
-                    existing_ids.add(n.get('id') or n.get('link'))
-                    domestic_in_result.append(n)
-                    if len(domestic_in_result) >= min_domestic:
-                        break
-                logger.info(f"财经源补充后: {len(domestic_in_result)} 条, 共{len(result)}条")
+请以JSON格式返回：
+{{
+  "keep_indices": [0, 3, 5, 8, 10],
+  "removed": [1, 2, 4, 6, 7, 9]
+}}
 
-        return result
+新闻列表：
+
+{chr(10).join(news_items)}"""
+
+    @staticmethod
+    def _title_tokens(title: str) -> set:
+        return set(re.findall(r'[\u4e00-\u9fff]|[a-zA-Z]+|\d+', str(title or '').lower()))
+
+    def _has_high_confidence_duplicate(
+        self,
+        candidate: Dict[str, Any],
+        kept: List[Dict[str, Any]],
+    ) -> bool:
+        candidate_event = self._normalize_key(candidate.get('event_key', ''))
+        candidate_link = self._normalize_link(candidate.get('link', ''))
+        candidate_tokens = self._title_tokens(candidate.get('title', ''))
+
+        for existing in kept:
+            existing_event = self._normalize_key(existing.get('event_key', ''))
+            existing_link = self._normalize_link(existing.get('link', ''))
+            if candidate_event and candidate_event == existing_event:
+                return True
+            if candidate_link and candidate_link == existing_link:
+                return True
+
+            existing_tokens = self._title_tokens(existing.get('title', ''))
+            if not candidate_tokens or not existing_tokens:
+                continue
+            union = len(candidate_tokens | existing_tokens)
+            if union and len(candidate_tokens & existing_tokens) / union >= 0.8:
+                return True
+
+        return False
+
+    def _parse_dedup_response(
+        self,
+        news_list: List[Dict[str, Any]],
+        result_text: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        if not result_text:
+            logger.warning("AI去重返回空结果，使用标题相似度去重")
+            return self._title_deduplicate(news_list)
+
+        result = _extract_json(result_text)
+        keep_indices = result.get('keep_indices', []) if result else []
+        normalized_indices = []
+        for value in keep_indices:
+            try:
+                index = int(value)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= index < len(news_list) and index not in normalized_indices:
+                normalized_indices.append(index)
+
+        if not normalized_indices:
+            logger.warning("AI去重没有返回有效索引，使用标题相似度去重")
+            return self._title_deduplicate(news_list)
+
+        kept_news = [news_list[i] for i in normalized_indices]
+        removed_indices = [i for i in range(len(news_list)) if i not in normalized_indices]
+        restored = [
+            news_list[i]
+            for i in removed_indices
+            if not self._has_high_confidence_duplicate(news_list[i], kept_news)
+        ]
+        if restored:
+            logger.info(f"AI去重保护性恢复 {len(restored)} 条低置信度移除项")
+        removed_titles = [
+            f"{i}:{news_list[i].get('title', '')[:30]}"
+            for i in removed_indices
+            if news_list[i] not in restored
+        ]
+        logger.info(
+            f"去重: 从{len(news_list)}条中移除{len(removed_titles)}条重复, "
+            f"移除明细={removed_titles}"
+        )
+        return kept_news + restored
 
     def _deduplicate_similar(self, news_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if len(news_list) <= 1:
             return news_list
-
-        news_items = []
-        for i, news in enumerate(news_list):
-            title = news.get('title', '')
-            summary = news.get('ai_summary', '') or (news.get('summary', '') or '')[:100]
-            score = news.get('relevance_score', 5)
-            news_items.append(f"[{i}] 标题: {title}\n摘要: {summary[:80]}\n评分: {score}")
-
-        news_text = "\n\n".join(news_items)
-
-        prompt = f"""请识别以下新闻中的重复/相似新闻，保留最重要的那条。
-
-判断标准：
-- 同一事件的不同报道（谈判、访问、会议等）只保留1条
-- 保留评分最高的
-- 如果评分相同，保留信息最完整的
-- 相似度>90%的应视为重复（宽松阈值，仅剔除完全重复报道，避免过度裁减）
-
-请以JSON格式返回：
-{{
-  "keep_indices": [0, 3, 5, 8, 10],
-  "removed": [1, 2, 4, 6, 7, 9]
-}}
-
-新闻列表：
-
-{news_text}"""
-
         result_text = self.client.chat(
             system_prompt="你是一个新闻去重助手，只返回JSON格式结果。",
-            user_prompt=prompt,
-            json_mode=True
+            user_prompt=self._build_dedup_prompt(news_list),
+            json_mode=True,
         )
-
-        if not result_text:
-            logger.warning("AI去重返回空结果，使用标题相似度去重")
-            return self._title_deduplicate(news_list)
-
-        result = _extract_json(result_text)
-        if not result:
-            logger.warning("AI去重结果解析失败，使用标题相似度去重")
-            return self._title_deduplicate(news_list)
-
-        keep_indices = result.get('keep_indices', [])
-        if not keep_indices:
-            logger.warning("AI去重返回空keep_indices，使用标题相似度去重")
-            return self._title_deduplicate(news_list)
-
-        logger.info(f"去重: 从{len(news_list)}条中移除{len(news_list)-len(keep_indices)}条重复")
-        return [news_list[i] for i in keep_indices if i < len(news_list)]
+        return self._parse_dedup_response(news_list, result_text)
 
     async def _deduplicate_similar_async(self, news_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if len(news_list) <= 1:
             return news_list
-
-        news_items = []
-        for i, news in enumerate(news_list):
-            title = news.get('title', '')
-            summary = news.get('ai_summary', '') or (news.get('summary', '') or '')[:100]
-            score = news.get('relevance_score', 5)
-            news_items.append(f"[{i}] 标题: {title}\n摘要: {summary[:80]}\n评分: {score}")
-
-        news_text = "\n\n".join(news_items)
-
-        prompt = f"""请识别以下新闻中的重复/相似新闻，保留最重要的那条。
-
-判断标准：
-- 同一事件的不同报道（谈判、访问、会议等）只保留1条
-- 保留评分最高的
-- 如果评分相同，保留信息最完整的
-- 相似度>90%的应视为重复（宽松阈值，仅剔除完全重复报道，避免过度裁减）
-
-请以JSON格式返回：
-{{
-  "keep_indices": [0, 3, 5, 8, 10],
-  "removed": [1, 2, 4, 6, 7, 9]
-}}
-
-新闻列表：
-
-{news_text}"""
-
         result_text = await self.client.chat_async(
-            system_prompt="你是一个新闻去重助手，只返回格式结果。",
-            user_prompt=prompt,
-            json_mode=True
+            system_prompt="你是一个新闻去重助手，只返回JSON格式结果。",
+            user_prompt=self._build_dedup_prompt(news_list),
+            json_mode=True,
         )
-
-        if not result_text:
-            logger.warning("AI去重返回空结果，使用标题相似度去重")
-            return self._title_deduplicate(news_list)
-
-        result = _extract_json(result_text)
-        if not result:
-            logger.warning("AI去重结果解析失败，使用标题相似度去重")
-            return self._title_deduplicate(news_list)
-
-        keep_indices = result.get('keep_indices', [])
-        if not keep_indices:
-            logger.warning("AI去重返回空keep_indices，使用标题相似度去重")
-            return self._title_deduplicate(news_list)
-
-        logger.info(f"去重: 从{len(news_list)}条中移除{len(news_list)-len(keep_indices)}条重复")
-        return [news_list[i] for i in keep_indices if i < len(news_list)]
+        return self._parse_dedup_response(news_list, result_text)
 
     def _title_deduplicate(self, news_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if len(news_list) <= 1:
             return news_list
 
         def _tokenize(text: str) -> set:
-            import re
-            return set(re.findall(r'[\u4e00-\u9fff]|[a-zA-Z]+|\d+', text.lower()))
+            return self._title_tokens(text)
 
         seen_tokens = []
         result = []
@@ -830,62 +948,68 @@ class AIFilter:
 
     def _event_deduplicate(self, news_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         dedup_window_hours = settings.filter_settings.get('dedup_window_hours', 72)
+        recent_events = self.storage.get_recent_events(days=max(dedup_window_hours // 24, 1))
+        recent_links = {
+            self._normalize_link(item.get('link', '')): item
+            for item in recent_events.values()
+            if self._normalize_link(item.get('link', ''))
+        }
+        logger.info(
+            f"加载已发布事件记忆: {len(recent_events)} 条, 规范化链接: {len(recent_links)} 条"
+        )
 
-        recent_events = self.storage.get_recent_events(days=dedup_window_hours // 24)
-        logger.info(f"加载历史事件记忆: {len(recent_events)} 条")
-
-        seen_events = {}
-        result = []
-        today_events_saved = []
+        seen_events: Dict[str, Dict[str, Any]] = {}
+        result: List[Dict[str, Any]] = []
 
         for news in news_list:
-            fingerprint = self._generate_event_fingerprint(news)
-            if not fingerprint or len(fingerprint) < 3:
+            normalized_link = self._normalize_link(news.get('link', ''))
+            if normalized_link and normalized_link in recent_links:
+                kept = recent_links[normalized_link]
+                logger.info(
+                    f"跨简报链接去重-跳过: [{news.get('source', '')}:{news.get('title', '')[:30]}] "
+                    f"(已发布: {kept.get('source', '')})"
+                )
+                continue
+
+            event_key = self._normalize_key(news.get('event_key', ''))
+            if not event_key:
+                event_key = self._normalize_key(self._generate_event_fingerprint(news))
+            news['event_key'] = event_key
+            news['story_key'] = self._derive_story_key(news, news.get('story_key', ''))
+
+            if not event_key:
                 result.append(news)
                 continue
 
+            if event_key in recent_events:
+                kept = recent_events[event_key]
+                logger.info(
+                    f"跨天事件去重-跳过: [{news.get('source', '')}:{news.get('title', '')[:30]}] "
+                    f"(已发布: {kept.get('source', '')})"
+                )
+                continue
+
             source = news.get('source', '')
-            source_priority = self.source_priorities.get(source, 1)
-            score = news.get('relevance_score', 5)
-
-            if fingerprint in recent_events:
-                kept_event = recent_events[fingerprint]
-                kept_priority = self.source_priorities.get(kept_event['source'], 1)
-
-                if source_priority > kept_priority:
-                    logger.info(f"跨天去重-替换: [{kept_event['source']}:{kept_event['title'][:20]}] -> [{source}:{news.get('title', '')[:20]}]")
-                    result = [n for n in result if n.get('source') != kept_event['source'] or n.get('title', '')[:20] != kept_event['title'][:20]]
-                    result.append(news)
-                    recent_events[fingerprint] = {
-                        'source': source, 'title': news.get('title', ''),
-                        'link': news.get('link', ''), 'event_date': news.get('published', '')[:10],
-                        'last_seen': news.get('published', '')
-                    }
-                    today_events_saved.append((fingerprint, source, news.get('title', ''), news.get('link', ''), news.get('published', '')[:10]))
-                else:
-                    logger.info(f"跨天去重-跳过: [{source}:{news.get('title', '')[:20]}] (已被 {kept_event['source']} 报道)")
-                    continue
-            elif fingerprint in seen_events:
-                existing = seen_events[fingerprint]
-                if source_priority > existing['priority'] or (source_priority == existing['priority'] and score > existing['score']):
-                    logger.info(f"同源去重-替换: [{existing['source']}:{existing['title'][:20]}] -> [{source}:{news.get('title', '')[:20]}]")
-                    result = [n for n in result if n.get('title') != existing['title']]
-                    result.append(news)
-                    seen_events[fingerprint] = {'source': source, 'title': news.get('title', ''), 'priority': source_priority, 'score': score}
-                    today_events_saved.append((fingerprint, source, news.get('title', ''), news.get('link', ''), news.get('published', '')[:10]))
-                else:
-                    logger.info(f"同源去重-跳过: [{source}:{news.get('title', '')[:20]}]")
-                    continue
-            else:
-                seen_events[fingerprint] = {'source': source, 'title': news.get('title', ''), 'priority': source_priority, 'score': score}
+            quality = (
+                news.get('relevance_score', 0),
+                news.get('novelty_score', 0),
+                self.source_priorities.get(source, 1),
+                len(news.get('ai_summary', '') or news.get('summary', '') or ''),
+            )
+            existing = seen_events.get(event_key)
+            if existing is None:
+                seen_events[event_key] = {'news': news, 'quality': quality}
                 result.append(news)
-                today_events_saved.append((fingerprint, source, news.get('title', ''), news.get('link', ''), news.get('published', '')[:10]))
+                continue
 
-        for fp, src, ttl, link, evt_date in today_events_saved:
-            if len(fp) >= 3:
-                self.storage.save_event_fingerprint(fp, src, ttl, link, evt_date)
-
-        self.storage.clean_old_events(days=14)
+            if quality > existing['quality']:
+                old_news = existing['news']
+                result = [item for item in result if item is not old_news]
+                result.append(news)
+                seen_events[event_key] = {'news': news, 'quality': quality}
+                logger.info(f"当日事件去重-替换: {old_news.get('title', '')[:30]} -> {news.get('title', '')[:30]}")
+            else:
+                logger.info(f"当日事件去重-跳过: {news.get('title', '')[:40]}")
 
         logger.info(f"事件去重: {len(news_list)} -> {len(result)} 条")
         return result
@@ -915,276 +1039,397 @@ class AIFilter:
 
         return filtered
 
-    def _ai_semantic_filter(self, news_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        max_news = self._load_filter_rules().get('max_news', 20)
+    def _prepare_unresolved_fallback(
+        self,
+        unresolved: List[Dict[str, Any]],
+        rules: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        if not unresolved:
+            return []
+
+        fallback_rules = {
+            **rules,
+            'max_news': min(self._candidate_pool_size(rules.get('max_news', 20)), len(unresolved)),
+        }
+        fallback = self._keyword_filter(unresolved, fallback_rules)
+        for news in fallback:
+            news['topic'] = self._normalize_topic(news.get('topic', '')) or self._infer_topic(news)
+            news['event_key'] = self._normalize_key(news.get('event_key', '')) or self._normalize_key(
+                self._generate_event_fingerprint(news)
+            )
+            news['story_key'] = self._derive_story_key(news, news.get('story_key', ''))
+            news['filter_reason'] = 'AI结构化响应失败，关键词回退候选'
+            news['_ai_fallback'] = True
+        logger.warning(f"AI结构化失败项使用关键词回退: {len(unresolved)} -> {len(fallback)} 条候选")
+        return fallback
+
+    def _build_ai_reserve(
+        self,
+        news_list: List[Dict[str, Any]],
+        selected: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        selected_ids = {item.get('id') or item.get('link') or id(item) for item in selected}
+        min_score = float(settings.filter_settings.get('ai_reserve_score_min', 4))
+        reserve = []
+        for news in news_list:
+            identity = news.get('id') or news.get('link') or id(news)
+            if identity in selected_ids or not news.get('_ai_assessed'):
+                continue
+            if news.get('topic') == '其他' or float(news.get('relevance_score', 0) or 0) < min_score:
+                continue
+            reserve.append(news)
+
+        reserve.sort(
+            key=lambda item: (
+                item.get('relevance_score', 0),
+                item.get('impact_score', 0),
+                item.get('novelty_score', 0),
+                self.source_priorities.get(item.get('source', ''), 1),
+            ),
+            reverse=True,
+        )
+        return reserve
+
+    def _finalize_ai_assessment(
+        self,
+        news_list: List[Dict[str, Any]],
+        selected: List[Dict[str, Any]],
+        unresolved: List[Dict[str, Any]],
+        rules: Dict[str, Any],
+    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        if unresolved:
+            selected.extend(self._prepare_unresolved_fallback(unresolved, rules))
+
+        selected = self._unique_candidates(selected)
+        reserve = self._build_ai_reserve(news_list, selected)
+        selected.sort(key=self._candidate_rank, reverse=True)
+        reserve.sort(key=self._candidate_rank, reverse=True)
+        limit = self._candidate_pool_size(rules.get('max_news', 20))
+        return selected[:limit], reserve[:limit]
+
+    def _ai_semantic_filter(
+        self,
+        news_list: List[Dict[str, Any]],
+        rules: Dict[str, Any],
+    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         batch_size = self.client.batch_size
-        all_results = []
-        failed_batches = 0
+        selected = []
+        unresolved = []
 
         for i in range(0, len(news_list), batch_size):
             batch = news_list[i:i + batch_size]
             logger.info(f"AI筛选批次 {i//batch_size + 1}/{(len(news_list)-1)//batch_size + 1}: {len(batch)} 条")
-            batch_results = self._ai_filter_batch(batch)
-            if len(batch_results) == 0:
-                failed_batches += 1
-            all_results.extend(batch_results)
+            batch_results, batch_unresolved = self._ai_filter_batch(batch)
+            selected.extend(batch_results)
+            unresolved.extend(batch_unresolved)
             if i + batch_size < len(news_list):
                 logger.info(f"批次间等待 {self.client.request_delay} 秒...")
                 time.sleep(self.client.request_delay)
 
-        if len(all_results) < 5:
-            logger.warning(f"AI筛选有效结果不足({len(all_results)}条)，降级为关键词筛选")
-            return self._keyword_filter(news_list, self._load_filter_rules())
+        return self._finalize_ai_assessment(news_list, selected, unresolved, rules)
 
-        all_results.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
-        return all_results[:max_news]
-
-    async def _ai_semantic_filter_async(self, news_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        max_news = self._load_filter_rules().get('max_news', 20)
+    async def _ai_semantic_filter_async(
+        self,
+        news_list: List[Dict[str, Any]],
+        rules: Dict[str, Any],
+    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         batch_size = self.client.batch_size
-        all_results = []
-        failed_batches = 0
+        selected = []
+        unresolved = []
 
         for i in range(0, len(news_list), batch_size):
             batch = news_list[i:i + batch_size]
             logger.info(f"AI筛选批次 {i//batch_size + 1}/{(len(news_list)-1)//batch_size + 1}: {len(batch)} 条")
-            batch_results = await self._ai_filter_batch_async(batch)
-            if len(batch_results) == 0:
-                failed_batches += 1
-            all_results.extend(batch_results)
+            batch_results, batch_unresolved = await self._ai_filter_batch_async(batch)
+            selected.extend(batch_results)
+            unresolved.extend(batch_unresolved)
             if i + batch_size < len(news_list):
                 logger.info(f"批次间等待 {self.client.request_delay} 秒...")
                 await asyncio.sleep(self.client.request_delay)
 
-        if len(all_results) < 5:
-            logger.warning(f"AI筛选有效结果不足({len(all_results)}条)，降级为关键词筛选")
-            return self._keyword_filter(news_list, self._load_filter_rules())
+        return self._finalize_ai_assessment(news_list, selected, unresolved, rules)
 
-        all_results.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
-        return all_results[:max_news]
-
-    def _ai_filter_batch(self, news_batch: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _build_filter_prompt(self, news_batch: List[Dict[str, Any]]) -> str:
         news_items = []
         for i, news in enumerate(news_batch):
             title = news.get('title', '')
             summary = (news.get('summary', '') or '')[:300]
             source = news.get('source', '')
             category = news.get('category', '')
-            news_items.append(f"[{i}] 标题: {title}\n来源: {source} | 分类: {category}\n摘要: {summary}")
+            news_items.append(f"[{i}] 标题: {title}\n来源: {source} | 来源分类: {category}\n摘要: {summary}")
 
-        news_text = "\n\n".join(news_items)
 
-        prompt = f"""请对以下新闻进行筛选和评分，并生成简洁摘要。
+        return f"""请逐条评估以下新闻。财经、宏观、产业和科技是核心；地缘政治只在重大升级或具有明确市场传导时保留。
 
-评分标准：
-- 8-10分：重大政策变化、行业格局性影响、地缘风险重大进展
-- 5-7分：有一定市场影响、政策信号意义、行业趋势变化
-- 3-4分：信息增量有限、影响面较窄
-- 1-2分：对决策无帮助、纯社会新闻、礼节性报道
+每条必须返回：
+- keep：1保留，0排除
+- score：综合分1-10
+- impact_score：市场/经济/产业影响1-10
+- novelty_score：相对近期报道的信息增量1-10
+- category：政策监管、财经市场、科技产业、国际局势、其他之一
+- story_key：同一长期故事共享的稳定短标识
+- event_key：同一具体事件共享的稳定短标识
+- reason：保留或排除理由
+- summary：中文事实摘要，包含具体行动、数据和影响；推断使用“可能”
 
-请以JSON格式返回，summary字段必须是中文摘要（核心事实+具体影响，包含时间/数据/人物等关键要素，如：4月16日美联储宣布降息25个基点，美元走弱，科技股受提振）：
+输出压缩要求：
+- 必须覆盖新闻列表中的每一个索引，不能省略被排除项
+- keep=0 时 reason 不超过15个汉字，summary 返回空字符串
+- story_key 和 event_key 使用不超过40字符的稳定短标识
+- 不要复述标题，不要使用 Markdown 代码块
+
+约束：
+1. 普通战况、口头威胁、采访角度或实时滚动更新，没有重大升级时最高5分。
+2. 纯观点或没有新数据、新政策、新公司行动的文章应排除或降至4分以下。
+3. 公司产能、并购、业绩、供应链、融资和重大技术进展应优先于重复地缘报道。
+4. 不要因为来源是国际大媒体就自动加分。
+
+严格返回：
 {{
   "results": {{
-    "0": {{ "keep": 1, "score": 8, "reason": "证监会发布新规直接影响市场交易规则", "summary": "证监会发布创业板第四套上市标准新规，要求企业营收不低于1亿元且研发投入占比超8%" }},
-    "1": {{ "keep": 0, "score": 2, "reason": "纯礼节性会见，无实质政策信息" }}
+    "0": {{"keep": 1, "score": 8, "impact_score": 8, "novelty_score": 9, "category": "科技产业", "story_key": "global-auto-capacity", "event_key": "company-cuts-one-million-capacity", "reason": "包含明确产能调整", "summary": "某汽车集团宣布削减100万辆产能，可能影响供应链和就业"}}
   }}
 }}
 
-keep=1 表示保留，keep=0 表示排除。只保留 score>=5 的新闻。
-
 新闻列表：
 
-{news_text}"""
+{chr(10).join(news_items)}"""
 
-        # 首次调用（json_mode=True）
+    def _filter_request_max_tokens(self) -> int:
+        return max(int(settings.filter_settings.get('ai_filter_max_tokens', 4000)), 1000)
+
+    def _parse_filter_result(
+        self,
+        news_batch: List[Dict[str, Any]],
+        result_text: str,
+    ) -> Optional[List[Dict[str, Any]]]:
+        result = _extract_json(result_text) if result_text else None
+        if not result:
+            logger.warning(f"AI筛选结果解析失败，响应前200字符: {(result_text or '空')[:200]}")
+            return None
+
+        results = result.get('results')
+        if not isinstance(results, dict):
+            logger.warning(f"AI筛选结果无有效results字段，响应前200字符: {(result_text or '')[:200]}")
+            return None
+
+        missing = [str(i) for i in range(len(news_batch)) if str(i) not in results]
+        if missing:
+            logger.warning(f"AI筛选结果不完整，缺少索引: {missing[:10]}")
+            return None
+
+        filtered = []
+        kept_count = 0
+        for i, news in enumerate(news_batch):
+            item_result = results.get(str(i), {})
+            if not isinstance(item_result, dict):
+                logger.warning(f"AI筛选索引 {i} 不是JSON对象")
+                return None
+
+            def score_value(name: str, default: float = 0) -> float:
+                try:
+                    return float(item_result.get(name, default) or default)
+                except (TypeError, ValueError):
+                    return float(default)
+
+            score = score_value('score')
+            impact_score = score_value('impact_score', score)
+            novelty_score = score_value('novelty_score', score)
+            keep = item_result.get('keep', 0) in (1, True, '1')
+
+            news['relevance_score'] = score
+            news['impact_score'] = impact_score
+            news['novelty_score'] = novelty_score
+            news['filter_reason'] = str(item_result.get('reason', '') or '')
+            news['topic'] = self._normalize_topic(item_result.get('category', '')) or self._infer_topic(news)
+            suggested_event = self._normalize_key(item_result.get('event_key', ''))
+            news['event_key'] = suggested_event or self._normalize_key(self._generate_event_fingerprint(news))
+            news['story_key'] = self._derive_story_key(news, item_result.get('story_key', ''))
+            ai_summary = str(item_result.get('summary', '') or '').strip()
+            if ai_summary:
+                news['ai_summary'] = ai_summary
+            news['_ai_assessed'] = True
+            news['_ai_keep'] = keep and score >= 5
+
+            if news['_ai_keep']:
+                if not news.get('ai_summary'):
+                    news['ai_summary'] = self._generate_simple_summary(news)
+                filtered.append(news)
+                kept_count += 1
+
+        logger.info(f"AI筛选批次结果: {len(results)}条评分, 保留{kept_count}条")
+        return filtered
+
+    def _ai_filter_batch(
+        self,
+        news_batch: List[Dict[str, Any]],
+        split_depth: int = 0,
+    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        prompt = self._build_filter_prompt(news_batch)
+        max_tokens = self._filter_request_max_tokens()
         result_text = self.client.chat(
             system_prompt=FILTER_SYSTEM_PROMPT,
             user_prompt=prompt,
-            json_mode=True
+            max_tokens=max_tokens,
+            json_mode=True,
         )
-
-        # 重试：空结果或解析失败时关闭 json_mode 重试
         if not result_text:
             logger.warning("AI筛选批次返回空结果，关闭 json_mode 重试")
             result_text = self.client.chat(
                 system_prompt=FILTER_SYSTEM_PROMPT,
-                user_prompt=prompt + "\n请务必以JSON格式返回，不要包含任何其他内容。",
-                json_mode=False
+                user_prompt=prompt + "\n请务必只返回JSON。",
+                max_tokens=max_tokens,
+                json_mode=False,
             )
 
-        result = _extract_json(result_text) if result_text else None
-        if not result:
-            logger.warning(f"AI筛选结果解析失败（重试后），原始响应: {(result_text or '空')[:200]}")
-            return []
+        parsed = self._parse_filter_result(news_batch, result_text)
+        if parsed is not None:
+            return parsed, []
 
-        filtered = []
-        results = result.get('results', {})
-        if not results:
-            logger.warning(f"AI筛选结果无results字段（重试后），原始响应: {result_text[:200]}")
-            return []
+        max_split_depth = max(int(settings.filter_settings.get('ai_filter_split_depth', 2)), 0)
+        if len(news_batch) > 1 and split_depth < max_split_depth:
+            midpoint = len(news_batch) // 2
+            logger.warning(
+                f"AI筛选批次JSON无效，拆分重试: {len(news_batch)} -> "
+                f"{midpoint}+{len(news_batch) - midpoint} (depth={split_depth + 1})"
+            )
+            left_results, left_unresolved = self._ai_filter_batch(news_batch[:midpoint], split_depth + 1)
+            right_results, right_unresolved = self._ai_filter_batch(news_batch[midpoint:], split_depth + 1)
+            return left_results + right_results, left_unresolved + right_unresolved
 
-        logger.info(f"AI筛选批次结果: {len(results)}条评分, 保留{sum(1 for v in results.values() if v.get('keep',0)==1 and v.get('score',0)>=5)}条")
+        logger.error(f"AI筛选批次在拆分后仍无法解析，保留 {len(news_batch)} 条作为显式回退输入")
+        return [], list(news_batch)
 
-        for i, news in enumerate(news_batch):
-            item_result = results.get(str(i), {})
-            score = item_result.get('score', 0)
-            if item_result.get('keep', 0) == 1 and score >= 5:
-                news['relevance_score'] = score
-                news['filter_reason'] = item_result.get('reason', '')
-                ai_summary = item_result.get('summary', '')
-                if ai_summary:
-                    news['ai_summary'] = ai_summary
-                else:
-                    news['ai_summary'] = self._generate_simple_summary(news)
-                filtered.append(news)
-
-        return filtered
-
-    async def _ai_filter_batch_async(self, news_batch: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        news_items = []
-        for i, news in enumerate(news_batch):
-            title = news.get('title', '')
-            summary = (news.get('summary', '') or '')[:300]
-            source = news.get('source', '')
-            category = news.get('category', '')
-            news_items.append(f"[{i}] 标题: {title}\n来源: {source} | 分类: {category}\n摘要: {summary}")
-
-        news_text = "\n\n".join(news_items)
-
-        prompt = f"""请对以下新闻进行筛选和评分，并生成简洁摘要。
-
-评分标准：
-- 8-10分：重大政策变化、行业格局性影响、地缘风险重大进展
-- 5-7分：有一定市场影响、政策信号意义、行业趋势变化
-- 3-4分：信息增量有限、影响面较窄
-- 1-2分：对决策无帮助、纯社会新闻、礼节性报道
-
-请以JSON格式返回，summary字段必须是中文摘要（核心事实+具体影响，包含时间/数据/人物等关键要素，如：4月16日美联储宣布降息25个基点，美元走弱，科技股受提振）：
-{{
-  "results": {{
-    "0": {{ "keep": 1, "score": 8, "reason": "证监会发布新规直接影响市场交易规则", "summary": "证监会发布创业板第四套上市标准新规，要求企业营收不低于1亿元且研发投入占比超8%" }},
-    "1": {{ "keep": 0, "score": 2, "reason": "纯礼节性会见，无实质政策信息" }}
-  }}
-}}
-
-keep=1 表示保留，keep=0 表示排除。只保留 score>=5 的新闻。
-
-新闻列表：
-
-{news_text}"""
-
+    async def _ai_filter_batch_async(
+        self,
+        news_batch: List[Dict[str, Any]],
+        split_depth: int = 0,
+    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        prompt = self._build_filter_prompt(news_batch)
+        max_tokens = self._filter_request_max_tokens()
         result_text = await self.client.chat_async(
             system_prompt=FILTER_SYSTEM_PROMPT,
             user_prompt=prompt,
-            json_mode=True
+            max_tokens=max_tokens,
+            json_mode=True,
         )
-
         if not result_text:
             logger.warning("AI筛选批次返回空结果，关闭 json_mode 重试")
             result_text = await self.client.chat_async(
                 system_prompt=FILTER_SYSTEM_PROMPT,
-                user_prompt=prompt + "\n请务必以JSON格式返回，不要包含任何其他内容。",
-                json_mode=False
+                user_prompt=prompt + "\n请务必只返回JSON。",
+                max_tokens=max_tokens,
+                json_mode=False,
             )
 
-        result = _extract_json(result_text) if result_text else None
-        if not result:
-            logger.warning(f"AI筛选结果解析失败（重试后），原始响应: {(result_text or '空')[:200]}")
-            return []
+        parsed = self._parse_filter_result(news_batch, result_text)
+        if parsed is not None:
+            return parsed, []
 
-        filtered = []
-        results = result.get('results', {})
-        if not results:
-            logger.warning(f"AI筛选结果无results字段（重试后），原始响应: {(result_text or '')[:200]}")
-            return []
+        max_split_depth = max(int(settings.filter_settings.get('ai_filter_split_depth', 2)), 0)
+        if len(news_batch) > 1 and split_depth < max_split_depth:
+            midpoint = len(news_batch) // 2
+            logger.warning(
+                f"AI筛选批次JSON无效，拆分重试: {len(news_batch)} -> "
+                f"{midpoint}+{len(news_batch) - midpoint} (depth={split_depth + 1})"
+            )
+            left_results, left_unresolved = await self._ai_filter_batch_async(
+                news_batch[:midpoint], split_depth + 1
+            )
+            right_results, right_unresolved = await self._ai_filter_batch_async(
+                news_batch[midpoint:], split_depth + 1
+            )
+            return left_results + right_results, left_unresolved + right_unresolved
 
-        logger.info(f"AI筛选批次结果: {len(results)}条评分, 保留{sum(1 for v in results.values() if v.get('keep',0)==1 and v.get('score',0)>=5)}条")
+        logger.error(f"AI筛选批次在拆分后仍无法解析，保留 {len(news_batch)} 条作为显式回退输入")
+        return [], list(news_batch)
 
-        for i, news in enumerate(news_batch):
-            item_result = results.get(str(i), {})
-            score = item_result.get('score', 0)
-            if item_result.get('keep', 0) == 1 and score >= 5:
-                news['relevance_score'] = score
-                news['filter_reason'] = item_result.get('reason', '')
-                ai_summary = item_result.get('summary', '')
-                if ai_summary:
-                    news['ai_summary'] = ai_summary
-                else:
-                    news['ai_summary'] = self._generate_simple_summary(news)
-                filtered.append(news)
-
-        return filtered
-
-    def _categorize_by_topic(self, news_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        topic_keywords = {
-            '国际局势': ['战争', '冲突', '制裁', '外交', '北约', '联合国', '停火', '边境', '军事', '袭击', '导弹', '货船',
-                         '伊朗', '俄罗斯', '乌克兰', '中东', '以色列', '台海', '南海', '美军', '北约', '联合国',
-                         'war', 'conflict', 'military', 'sanction', 'attack', 'iran', 'russia', 'ukraine', 'middle east', 'strike'],
-            '政策监管': ['政策', '监管', '证监会', '央行', '降息', '加息', '利率', '法规', '立法', '审批', '审查', '新规',
-                         '关税', '贸易', '海关', '出口', '进口', '美联储', 'fed', 'regulation', 'policy', 'rate', 'sanction',
-                         'tariff', 'trade', 'customs'],
-            '财经市场': ['股市', '上涨', '下跌', '指数', '期货', '油价', '油价', '汇率', '美元', '黄金', '债券', '通胀',
-                         'ipo', '财报', '业绩', '并购', '收购', '涨停', '跌停', '成交量', '市值', '基金',
-                         'stock', 'market', 'oil price', 'dollar', 'gold', 'inflation', 'earnings', 'fed', 'rate cut'],
-            '科技产业': ['芯片', '半导体', 'ai', '人工智能', '科技', '创新', '发布', '突破', '华为', '英伟达', '苹果',
-                         '自动驾驶', '电动车', '新能源', '电池', '航天', '发射',
-                         'chip', 'ai', 'tech', 'apple', 'nvidia', 'tesla', 'spacex', 'satellite', 'electric vehicle'],
-        }
-        market_impact_topics = {'政策监管', '财经市场', '国际局势'}
-        max_news = self._load_filter_rules().get('max_news', 20)
+    def _categorize_by_topic(
+        self,
+        news_list: List[Dict[str, Any]],
+        max_news: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        if max_news is None:
+            max_news = self._load_filter_rules().get('max_news', 20)
+        quotas = settings.filter_settings.get('topic_quotas', {})
+        per_source_max = max(int(settings.filter_settings.get('per_source_max', 4)), 1)
+        per_story_max = max(int(settings.filter_settings.get('per_story_max', 2)), 1)
 
         for news in news_list:
-            text = (news.get('title', '') + ' ' + (news.get('ai_summary', '') or news.get('summary', '') or '')).lower()
-            news['topic'] = '其他'
-            for topic, keywords in topic_keywords.items():
-                if any(kw.lower() in text for kw in keywords):
-                    news['topic'] = topic
+            news['topic'] = self._normalize_topic(news.get('topic', '')) or self._infer_topic(news)
+            news['event_key'] = self._normalize_key(news.get('event_key', '')) or self._normalize_key(self._generate_event_fingerprint(news))
+            news['story_key'] = self._derive_story_key(news, news.get('story_key', ''))
+
+        candidates = sorted(news_list, key=self._candidate_rank, reverse=True)
+        selected: List[Dict[str, Any]] = []
+        selected_ids = set()
+        source_counts: Dict[str, int] = {}
+        story_counts: Dict[str, int] = {}
+        topic_counts: Dict[str, int] = {}
+
+        def add(news: Dict[str, Any], source_limit: int, enforce_topic_quota: bool) -> bool:
+            identity = news.get('id') or news.get('link') or id(news)
+            if identity in selected_ids:
+                return False
+            source = news.get('source', '未知')
+            story = news.get('story_key', '')
+            topic = news.get('topic', '其他')
+            topic_quota = int(quotas.get(topic, max_news))
+            if source_counts.get(source, 0) >= source_limit:
+                return False
+            if story and story_counts.get(story, 0) >= per_story_max:
+                return False
+            if topic == '国际局势' and topic_counts.get(topic, 0) >= topic_quota:
+                return False
+            if enforce_topic_quota and topic_counts.get(topic, 0) >= topic_quota:
+                return False
+            selected.append(news)
+            selected_ids.add(identity)
+            source_counts[source] = source_counts.get(source, 0) + 1
+            if story:
+                story_counts[story] = story_counts.get(story, 0) + 1
+            topic_counts[topic] = topic_counts.get(topic, 0) + 1
+            return True
+
+        # 先按目标版面填充核心分类，避免高分地缘新闻占满名额。
+        for topic in ('政策监管', '财经市场', '科技产业', '国际局势', '其他'):
+            target = int(quotas.get(topic, 0))
+            if target <= 0:
+                continue
+            for news in candidates:
+                if news.get('topic') == topic:
+                    add(news, per_source_max, True)
+                if topic_counts.get(topic, 0) >= target or len(selected) >= max_news:
                     break
 
-        priority_1 = [n for n in news_list if n.get('topic') in market_impact_topics and n.get('relevance_score', 0) >= 5]
-        priority_1.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
-
-        priority_2 = [n for n in news_list if n.get('topic') not in market_impact_topics or n.get('relevance_score', 0) < 5]
-        priority_2.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
-
-        result = priority_1[:max_news]
-        remaining = max_news - len(result)
-        if remaining > 0:
-            result.extend(priority_2[:remaining])
-
-        category_groups: Dict[str, List[Dict[str, Any]]] = {}
-        for news in result:
-            topic = news.get('topic', '其他')
-            if topic not in category_groups:
-                category_groups[topic] = []
-            category_groups[topic].append(news)
-
-        ordered_result = []
-        for topic in settings.category_order:
-            if topic in category_groups:
-                ordered_result.extend(category_groups[topic])
-
-        return ordered_result
-
-    def _ensure_source_diversity(self, news_list: List[Dict[str, Any]], max_news: int) -> List[Dict[str, Any]]:
-        result = []
-        source_counts: Dict[str, int] = {}
-        per_source_max = max(max_news // 3, 3)
-
-        for news in news_list:
-            source = news.get('source', '未知')
-            if source_counts.get(source, 0) < per_source_max:
-                result.append(news)
-                source_counts[source] = source_counts.get(source, 0) + 1
-            if len(result) >= max_news:
+        # 核心分类不足时按总分补位；地缘政治、故事和来源上限仍然生效。
+        for news in candidates:
+            if len(selected) >= max_news:
                 break
+            add(news, per_source_max, False)
 
-        return result
+        # 若来源较少导致条目不足，仅小幅放宽来源上限，不放宽故事和地缘上限。
+        if len(selected) < max_news:
+            for news in candidates:
+                if len(selected) >= max_news:
+                    break
+                add(news, per_source_max + 2, False)
 
+        logger.info(
+            f"组合选稿: {len(news_list)} -> {len(selected)} 条, "
+            f"分类={topic_counts}, 来源={source_counts}"
+        )
+        return selected
 
 class AITranslator:
     def __init__(self):
         self.client = AIClient()
+
+    @staticmethod
+    def _clean_translation_line(value: str) -> str:
+        value = re.sub(r'^\s*\[\d+\]\s*', '', str(value or ''))
+        value = re.sub(r'^\s*(?:标题|摘要|title|summary)\s*[:：]\s*', '', value, flags=re.IGNORECASE)
+        return value.strip()
 
     def is_available(self) -> bool:
         return self.client.is_configured() and settings.ai_translate_enabled
@@ -1221,6 +1466,31 @@ class AITranslator:
             logger.error(f"翻译过程出错: {e}")
         return news_list
 
+    @staticmethod
+    def _translation_summary(news: Dict[str, Any]) -> str:
+        return str(news.get('ai_summary', '') or news.get('summary', '') or '')[:300]
+
+    def _apply_translation(
+        self,
+        news: Dict[str, Any],
+        translated_title: str,
+        translated_summary: str = '',
+    ) -> None:
+        original_title = news.get('title', '')
+        clean_title = self._clean_translation_line(translated_title)
+        clean_summary = self._clean_translation_line(translated_summary)
+        if clean_title:
+            news['title_original'] = original_title
+            news['title'] = clean_title
+        if clean_summary:
+            if news.get('ai_summary'):
+                news['ai_summary_original'] = news.get('ai_summary', '')
+                news['ai_summary'] = clean_summary
+            else:
+                news['summary_original'] = news.get('summary', '')
+                news['summary'] = clean_summary
+        news['translated'] = 1
+
     def _translate_batch_text(self, news_batch: List[Dict[str, Any]]) -> None:
         batch_size = 5
         for start in range(0, len(news_batch), batch_size):
@@ -1229,7 +1499,7 @@ class AITranslator:
             items = []
             for i, news in enumerate(batch):
                 title = news.get('title', '')
-                summary = (news.get('summary', '') or '')[:300]
+                summary = self._translation_summary(news)
                 items.append(f"[{i}] Title: {title}\nSummary: {summary}")
 
             text = "\n\n".join(items)
@@ -1263,16 +1533,10 @@ Separate each item with a blank line.
                 if i < len(blocks):
                     lines = [l.strip() for l in blocks[i].split('\n') if l.strip()]
                     if len(lines) >= 2:
-                        news['title_original'] = news['title']
-                        news['title'] = lines[0]
-                        if not news.get('ai_summary'):
-                            news['summary_original'] = news.get('summary', '')
-                            news['summary'] = lines[1]
-                        news['translated'] = 1
+                        self._apply_translation(news, lines[0], lines[1])
                     elif len(lines) == 1:
-                        news['title_original'] = news['title']
-                        news['title'] = lines[0]
-                        news['translated'] = 1
+                        logger.warning(f"翻译批次缺少摘要，逐条回退: {news.get('title', '')[:60]}")
+                        self._translate_single_fallback(news)
                     else:
                         logger.warning(f"翻译解析失败: 块 {i} 无有效行，来源={news.get('source')}, 标题={news.get('title', '')[:60]}")
                         self._translate_single_fallback(news)
@@ -1282,18 +1546,13 @@ Separate each item with a blank line.
 
     def _translate_single_fallback(self, news: Dict[str, Any]) -> None:
         title = news.get('title', '')
-        summary = (news.get('summary', '') or '')[:300]
-        if not news.get('ai_summary'):
-            prompt = f"""Translate the following English news into Simplified Chinese. Return EXACTLY two lines:
+        summary = self._translation_summary(news)
+        prompt = f"""Translate the following English news into Simplified Chinese. Return EXACTLY two lines:
 Line 1: Chinese title (concise, include key entities)
 Line 2: Chinese summary (one sentence, 30-80 chars, include who did what + specific impact)
 
 Title: {title}
 Summary: {summary}"""
-        else:
-            prompt = f"""Translate the following English news title into Simplified Chinese. Return ONLY the Chinese title, one line.
-
-Title: {title}"""
 
         result_text = self.client.chat(
             system_prompt="You are a professional English-to-Chinese news translator. Preserve ALL key facts.",
@@ -1307,17 +1566,12 @@ Title: {title}"""
             logger.warning(f"逐条翻译回退失败(API返回空): {title[:60]}")
             return
 
-        lines = [l.strip() for l in result_text.strip().split('\n') if l.strip()]
+        lines = [line.strip() for line in result_text.strip().split('\n') if line.strip()]
         if not lines:
             logger.warning(f"逐条翻译回退失败(无有效行): {title[:60]}")
             return
 
-        news['title_original'] = news['title']
-        news['title'] = lines[0]
-        if not news.get('ai_summary') and len(lines) >= 2:
-            news['summary_original'] = news.get('summary', '')
-            news['summary'] = lines[1]
-        news['translated'] = 1
+        self._apply_translation(news, lines[0], lines[1] if len(lines) >= 2 else '')
         logger.info(f"逐条翻译回退成功: {title[:60]} -> {lines[0][:60]}")
 
     async def _translate_batch_text_async(self, news_batch: List[Dict[str, Any]]) -> None:
@@ -1328,7 +1582,7 @@ Title: {title}"""
             items = []
             for i, news in enumerate(batch):
                 title = news.get('title', '')
-                summary = (news.get('summary', '') or '')[:300]
+                summary = self._translation_summary(news)
                 items.append(f"[{i}] Title: {title}\nSummary: {summary}")
 
             text = "\n\n".join(items)
@@ -1362,16 +1616,10 @@ Separate each item with a blank line.
                 if i < len(blocks):
                     lines = [l.strip() for l in blocks[i].split('\n') if l.strip()]
                     if len(lines) >= 2:
-                        news['title_original'] = news['title']
-                        news['title'] = lines[0]
-                        if not news.get('ai_summary'):
-                            news['summary_original'] = news.get('summary', '')
-                            news['summary'] = lines[1]
-                        news['translated'] = 1
+                        self._apply_translation(news, lines[0], lines[1])
                     elif len(lines) == 1:
-                        news['title_original'] = news['title']
-                        news['title'] = lines[0]
-                        news['translated'] = 1
+                        logger.warning(f"翻译批次缺少摘要，逐条回退: {news.get('title', '')[:60]}")
+                        self._translate_single_fallback(news)
                     else:
                         logger.warning(f"翻译解析失败: 块 {i} 无有效行，来源={news.get('source')}, 标题={news.get('title', '')[:60]}")
                         self._translate_single_fallback(news)

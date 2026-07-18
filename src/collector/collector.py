@@ -4,7 +4,7 @@ from bs4 import BeautifulSoup
 import hashlib
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.config.config import settings
 import logging
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 class NewsCollector:
 
     def __init__(self):
-        self.news_sources = settings.news_sources
+        self.news_sources = settings.resolved_news_sources()
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -29,6 +29,25 @@ class NewsCollector:
                 'https': settings.http_proxy,
             }
             logger.info(f"使用代理: {settings.http_proxy}")
+
+    @staticmethod
+    def _is_external_link(url: str) -> bool:
+        return urlsplit(str(url or '')).scheme.lower() in {'http', 'https'}
+
+    def _request(self, url: str, source: Dict[str, Any], timeout: int):
+        request_kwargs = {
+            'headers': self.headers,
+            'timeout': timeout,
+            'allow_redirects': True,
+        }
+        if source.get('proxy_mode') == 'bypass':
+            session = requests.Session()
+            session.trust_env = False
+            try:
+                return session.get(url, **request_kwargs)
+            finally:
+                session.close()
+        return requests.get(url, proxies=self.proxies, **request_kwargs)
 
     def collect_news(self) -> List[Dict[str, Any]]:
         all_news = []
@@ -58,69 +77,68 @@ class NewsCollector:
         return unique_news
 
     def _collect_by_rss(self, source: Dict[str, Any]) -> List[Dict[str, Any]]:
+        response = self._request(source['url'], source, timeout=20)
+        if response.status_code != 200:
+            raise RuntimeError(f"RSS 请求失败: HTTP {response.status_code}")
+
+        feed = feedparser.parse(response.content)
+        entries = list(feed.entries or [])
+        if feed.bozo:
+            message = f"解析 {source['name']} 的 RSS 时出错: {feed.bozo_exception}"
+            if not entries:
+                raise ValueError(message)
+            logger.warning(message)
+        if not entries:
+            logger.warning(f"{source['name']} RSS 返回空 Feed")
+            return []
+
         news_list = []
-        try:
-            try:
-                response = requests.get(source['url'], headers=self.headers, timeout=20, allow_redirects=True, proxies=self.proxies)
-                if response.status_code == 200:
-                    try:
-                        response.encoding = response.apparent_encoding
-                    except Exception:
-                        pass
-                    feed = feedparser.parse(response.text)
-                else:
-                    feed = feedparser.parse(source['url'])
-            except Exception:
-                feed = feedparser.parse(source['url'])
+        skipped_invalid = 0
+        skipped_keyword = 0
+        max_articles = max(int(source.get('max_articles', 20)), 0)
+        for entry in entries[:max_articles]:
+            news = self._parse_rss_entry(entry, source)
+            if not news:
+                skipped_invalid += 1
+                continue
 
-            if feed.bozo:
-                logger.warning(f"解析 {source['name']} 的 RSS 时出错: {feed.bozo_exception}")
-                try:
-                    response = requests.get(source['url'], headers=self.headers, timeout=15, allow_redirects=True, proxies=self.proxies)
-                    if response.status_code == 200:
-                        try:
-                            response.encoding = response.apparent_encoding
-                        except Exception:
-                            pass
-                        feed = feedparser.parse(response.text)
-                        if not feed.bozo:
-                            logger.info(f"使用备用方法成功解析 {source['name']} 的 RSS")
-                except Exception as e:
-                    logger.error(f"备用方法解析 {source['name']} 的 RSS 时出错: {str(e)}")
+            source_exclude = source.get('exclude_keywords', [])
+            if source_exclude:
+                text = f"{news['title']} {news['summary']}".lower()
+                if any(str(keyword).lower() in text for keyword in source_exclude):
+                    skipped_keyword += 1
+                    continue
 
-            for entry in feed.entries:
-                news = self._parse_rss_entry(entry, source)
-                if news:
-                    source_exclude = source.get('exclude_keywords', [])
-                    if source_exclude:
-                        text = f"{news['title']} {news['summary']}".lower()
-                        if any(kw.lower() in text for kw in source_exclude):
-                            continue
-                    if not news['summary'] or len(news['summary']) < 100:
-                        _, full_content = self._fetch_full_content(news['link'])
-                        if full_content:
-                            news['summary'] = full_content
-                    news_list.append(news)
-        except Exception as e:
-            logger.error(f"RSS 采集 {source['name']} 时出错: {str(e)}")
+            should_fetch_content = source.get('fetch_full_content', True)
+            if (
+                should_fetch_content
+                and self._is_external_link(news['link'])
+                and (not news['summary'] or len(news['summary']) < 100)
+            ):
+                page_title, full_content = self._fetch_full_content(news['link'], source)
+                if full_content:
+                    news['summary'] = full_content
+                    if page_title and len(page_title) >= 8:
+                        news['title'] = page_title
 
+            news_list.append(news)
+
+        logger.info(
+            f"RSS解析 {source['name']}: 条目={len(entries)}, 读取={min(len(entries), max_articles)}, "
+            f"接受={len(news_list)}, 字段无效={skipped_invalid}, 关键词排除={skipped_keyword}"
+        )
         return news_list
 
     def _collect_by_scraping(self, source: Dict[str, Any]) -> List[Dict[str, Any]]:
         news_list = []
         try:
             url = source['url']
-            response = requests.get(url, headers=self.headers, timeout=15, allow_redirects=True, proxies=self.proxies)
+            response = self._request(url, source, timeout=15)
             if response.status_code != 200:
                 logger.warning(f"抓取 {source['name']} 首页失败: HTTP {response.status_code}")
                 return news_list
 
-            try:
-                response.encoding = response.apparent_encoding
-            except Exception:
-                pass
-
-            soup = BeautifulSoup(response.text, 'html.parser')
+            soup = BeautifulSoup(response.content, 'html.parser')
 
             article_link_patterns = source.get('link_patterns', ['/20', 'article', 'detail', 'content'])
             max_articles = source.get('max_articles', 20)
@@ -144,7 +162,7 @@ class NewsCollector:
                 if len(news_list) >= max_articles:
                     break
 
-                page_title, summary = self._fetch_full_content(full_url)
+                page_title, summary = self._fetch_full_content(full_url, source)
                 if not summary or len(summary) < 50:
                     continue
 
@@ -171,95 +189,86 @@ class NewsCollector:
 
     def _parse_rss_entry(self, entry: Dict[str, Any], source: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         try:
-            title = entry.get('title', '').strip()
-            link = entry.get('link', '')
-            published = entry.get('published', '') or entry.get('pubDate', '')
-            summary = entry.get('summary', '').strip() or entry.get('description', '').strip()
+            title = str(entry.get('title', '') or '').strip()
+            link = str(entry.get('link', '') or '').strip()
+            guid = str(entry.get('id', '') or entry.get('guid', '') or '').strip()
+            published = str(
+                entry.get('published', '') or entry.get('pubDate', '') or entry.get('updated', '') or ''
+            ).strip()
+            summary = str(entry.get('summary', '') or entry.get('description', '') or '').strip()
 
-            published_date = None
             tz_cn = timezone(timedelta(hours=8))
-            if published:
+            published_date = None
+            parsed_time = entry.get('published_parsed') or entry.get('updated_parsed') or entry.get('pubdate_parsed')
+            if parsed_time:
+                published_date = datetime(*parsed_time[:6], tzinfo=timezone.utc)
+            elif published:
                 try:
-                    if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                        published_date = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
-                    elif hasattr(entry, 'pubdate_parsed') and entry.pubdate_parsed:
-                        published_date = datetime(*entry.pubdate_parsed[:6], tzinfo=timezone.utc)
-                    else:
-                        import dateutil.parser
-                        published_date = dateutil.parser.parse(published)
-                except Exception:
-                    published_date = datetime.now(tz_cn)
-            else:
+                    import dateutil.parser
+                    published_date = dateutil.parser.parse(published)
+                    if published_date.tzinfo is None:
+                        published_date = published_date.replace(tzinfo=timezone.utc)
+                except Exception as exc:
+                    logger.warning(f"{source['name']} 发布时间解析失败，使用采集时间: {published} ({exc})")
+            if published_date is None:
                 published_date = datetime.now(tz_cn)
 
             content = ''
-            if 'content' in entry:
-                content = ' '.join([c.get('value', '') for c in entry.content])
-            elif 'content:encoded' in entry:
-                content = entry['content:encoded']
+            entry_content = entry.get('content') or []
+            if entry_content:
+                content = ' '.join(str(item.get('value', '') or '') for item in entry_content)
+            elif entry.get('content:encoded'):
+                content = str(entry.get('content:encoded') or '')
 
             summary = self._clean_html(summary)
             content = self._clean_html(content)
-
             if not summary and content:
                 summary = content
 
-            is_google_news_junk = (
-                'news.google.com' in link and (
-                    not summary or summary.startswith('http') or len(summary) < 30 or 'CBMi' in summary
-                )
-            )
+            if not title:
+                return None
 
-            if is_google_news_junk or not summary or len(summary) < 50:
-                fetch_url = link
-                if 'news.google.com' in link:
-                    try:
-                        r = requests.get(link, headers=self.headers, timeout=10, allow_redirects=True, proxies=self.proxies)
-                        fetch_url = r.url
-                    except Exception:
-                        pass
-                page_title, full_content = self._fetch_full_content(fetch_url)
-                if full_content:
-                    summary = full_content
-                    if page_title and len(page_title) >= 8:
-                        title = page_title
-                    if fetch_url != link:
-                        link = fetch_url
+            published_iso = published_date.isoformat()
+            if not link:
+                if not source.get('allow_missing_link', False):
+                    return None
+                stable_text = '\n'.join([
+                    guid or title,
+                    published_iso,
+                    ' '.join(summary.split()),
+                ])
+                digest = hashlib.sha256(stable_text.encode('utf-8')).hexdigest()
+                prefix = str(source.get('synthetic_link_prefix', 'urn:newsflow:item')).rstrip(':')
+                link = f"{prefix}:{digest}"
+                content_hash = digest
+            else:
+                content_hash = self._generate_hash(title + link)
 
-            content_hash = self._generate_hash(title + link)
-
-            news = {
+            collected_at = datetime.now(tz_cn).isoformat()
+            return {
                 'title': title,
                 'summary': summary,
                 'link': link,
                 'source': source['name'],
-                'published': published_date.isoformat() if hasattr(published_date, 'isoformat') else str(published_date),
-                'collected_at': datetime.now(tz_cn).isoformat(),
+                'published': published_iso,
+                'collected_at': collected_at,
                 'category': source.get('category', '未分类'),
-                'content_hash': content_hash
+                'content_hash': content_hash,
             }
 
-            if not title or not link:
-                return None
-
-            return news
-
-        except Exception as e:
-            logger.error(f"解析新闻条目时出错: {str(e)}")
+        except Exception as exc:
+            logger.error(f"解析 {source.get('name', '未知来源')} 新闻条目时出错: {exc}")
             return None
 
-    def _fetch_full_content(self, url: str) -> tuple:
+    def _fetch_full_content(self, url: str, source: Optional[Dict[str, Any]] = None) -> tuple:
         try:
-            response = requests.get(url, headers=self.headers, timeout=15, allow_redirects=True, proxies=self.proxies)
+            if not self._is_external_link(url):
+                return ('', '')
+            response = self._request(url, source or {}, timeout=15)
             if response.status_code != 200:
                 return ('', '')
 
-            try:
-                response.encoding = response.apparent_encoding
-            except Exception:
-                pass
-
-            soup = BeautifulSoup(response.text, 'html.parser')
+            soup = BeautifulSoup(response.content, 'html.parser')
 
             page_title = ''
             title_tag = soup.find('title')

@@ -452,9 +452,13 @@ function switchTab(name) {
 function renderNewsItem(n) {
     const translated = n.translated ? `<span class="badge badge-translated">已翻译</span>` : '';
     const originalTitle = n.title_original ? `<div class="original">原文: ${n.title_original}</div>` : '';
+    const isExternalLink = /^https?:\/\//i.test(n.link || '');
+    const titleHtml = isExternalLink
+        ? `<a href="${n.link}" target="_blank" rel="noopener">${n.title}</a>`
+        : n.title;
     return `
         <div class="news-item">
-            <h3><a href="${n.link}" target="_blank">${n.title}</a></h3>
+            <h3>${titleHtml}</h3>
             ${originalTitle}
             <div class="meta">
                 <span class="badge badge-source">${n.source}</span>

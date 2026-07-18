@@ -300,6 +300,7 @@ class NewsStorage:
             'source': row['source'],
             'published': published,
             'collected_at': collected_at,
+            '_published_timezone': 'Asia/Shanghai' if published else '',
             'category': row['category'],
             'content_hash': row['content_hash'],
             'title_original': row['title_original'] if 'title_original' in row.keys() else '',
@@ -467,6 +468,28 @@ class NewsStorage:
         except Exception as e:
             logger.error(f"保存事件指纹时出错: {str(e)}")
             return False
+
+    def remember_published_events(self, news_list: List[Dict[str, Any]]) -> int:
+        """Persist stable event keys only for items that were actually published."""
+        saved = 0
+        for news in news_list:
+            event_key = str(news.get('event_key', '') or '').strip()
+            if not event_key:
+                continue
+            event_date = str(news.get('published', '') or '')[:10]
+            if not event_date:
+                event_date = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d')
+            if self.save_event_fingerprint(
+                event_key,
+                str(news.get('source', '') or ''),
+                str(news.get('title', '') or ''),
+                str(news.get('link', '') or ''),
+                event_date,
+            ):
+                saved += 1
+        self.clean_old_events(days=14)
+        logger.info(f"已记录 {saved} 条实际发布事件")
+        return saved
 
     def get_recent_events(self, days: int = 7) -> Dict[str, Dict[str, Any]]:
         tz_cn = timezone(timedelta(hours=8))

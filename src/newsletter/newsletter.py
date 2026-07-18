@@ -2,6 +2,7 @@ import os
 from html import escape
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
+from urllib.parse import urlsplit
 from src.config.config import settings
 from src.storage.storage import NewsStorage
 import logging
@@ -57,8 +58,9 @@ class NewsletterGenerator:
             if newsletter_id is None:
                 logger.error("简报未能保存到数据库")
                 return None
+            self.storage.remember_published_events(news_list)
         except Exception as e:
-            logger.error(f"保存简报到数据库时出错: {str(e)}")
+            logger.error(f"保存简报到数据库或记录事件记忆时出错: {str(e)}")
 
         return output_path
 
@@ -105,10 +107,19 @@ class NewsletterGenerator:
         for news in all_news:
             source = str(news.get('source', '未知') or '未知')
             published = str(news.get('published', '') or '')
+            topic = str(news.get('topic', '其他') or '其他')
             summary = str(news.get('ai_summary', '') or self._generate_simple_summary(news))
             if len(summary) > 150:
                 summary = summary[:150] + '…'
-            link = str(news.get('link', '#') or '#')
+            link = str(news.get('link', '') or '')
+            is_external_link = urlsplit(link).scheme.lower() in {'http', 'https'}
+            if is_external_link:
+                summary_html = (
+                    f'<a class="brief-summary" href="{escape(link, quote=True)}" '
+                    f'target="_blank" rel="noopener">{escape(summary)}</a>'
+                )
+            else:
+                summary_html = f'<span class="brief-summary">{escape(summary)}</span>'
             source_initial = escape(source[0]) if source else '新'
 
             items_html += f'''
@@ -117,9 +128,10 @@ class NewsletterGenerator:
                     <div class="brief-content">
                         <div class="brief-meta">
                             <span class="brief-source">{escape(source)}</span>
+                            <span class="brief-topic">{escape(topic)}</span>
                             <span class="brief-time">{escape(published)}</span>
                         </div>
-                        <a class="brief-summary" href="{escape(link, quote=True)}" target="_blank" rel="noopener">{escape(summary)}</a>
+                        {summary_html}
                     </div>
                 </article>'''
 
@@ -149,6 +161,7 @@ class NewsletterGenerator:
         .brief-content {{ min-width: 0; flex: 1; }}
         .brief-meta {{ display: flex; align-items: baseline; gap: 9px; margin-bottom: 8px; }}
         .brief-source {{ color: #234a70; font-size: 17px; font-weight: 750; }}
+        .brief-topic {{ padding: 2px 7px; border-radius: 999px; background: #edf3f8; color: #4c6278; font-size: 12px; font-weight: 700; white-space: nowrap; }}
         .brief-time {{ color: #697789; font-size: 13px; white-space: nowrap; }}
         .brief-summary {{ display: block; color: #172236; font-size: 20px; font-weight: 550; line-height: 1.68; letter-spacing: 0; text-decoration: none; }}
         .brief-summary:hover {{ color: #1d5c93; }}

@@ -25,7 +25,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="每日新闻流管理系统", version="3.1.0")
+app = FastAPI(title="每日新闻流管理系统", version=settings.system_version)
 storage = NewsStorage()
 
 scheduler = NewsScheduler()
@@ -617,7 +617,7 @@ async def delete_filter_rule(rule_id: int):
 
 @app.get("/api/news-sources")
 async def get_news_sources():
-    return settings.news_sources
+    return settings.resolved_news_sources()
 
 
 @app.get("/api/ai-config")

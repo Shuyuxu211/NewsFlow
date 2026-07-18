@@ -198,7 +198,7 @@ def status():
     click.echo(f"定时任务: 每日 {settings.collect_hour:02d}:{settings.collect_minute:02d}")
 
     click.echo("\n新闻源配置:")
-    for source in settings.news_sources:
+    for source in settings.resolved_news_sources():
         status_str = "启用" if source.get('enabled', False) else "禁用"
         mode = source.get('mode', 'rss')
         click.echo(f"  - {source['name']} ({status_str}, {mode}, {source.get('category', '')}): {source['url']}")

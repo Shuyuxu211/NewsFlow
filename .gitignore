@@ -46,6 +46,7 @@ _git_*.txt
 # Local AI/editor instructions and one-off investigation artifacts
 AGENTS.md
 AI_CONTEXT.md
+HANDOFF.md
 .kilo/
 plans/
 diagnose_startup.bat

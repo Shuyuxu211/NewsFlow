@@ -87,11 +87,9 @@ class NewsScheduler:
             else:
                 logger.info("翻译功能未启用或未配置AI")
 
-            logger.info("步骤5: 事件去重")
-            deduplicated = ai_filter._event_deduplicate(filtered)
-            if len(deduplicated) < len(filtered):
-                logger.info(f"事件去重完成: {len(filtered)} -> {len(deduplicated)} 条")
-            filtered = deduplicated
+            # AIFilter 内部已经完成文章、事件和故事级约束；翻译后不得再次按文本去重，
+            # 否则未翻译的中文条目会命中本次运行刚生成的事件标识，而英文标题变化后反而绕过去重。
+            logger.info("步骤5: 使用筛选阶段的去重结果")
 
             logger.info("步骤6: 生成简报")
             generator = NewsletterGenerator()

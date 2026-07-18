@@ -1,10 +1,11 @@
+from copy import deepcopy
 from pydantic_settings import BaseSettings
 from typing import List, Dict, Any
 
 
 class Settings(BaseSettings):
     system_name: str = "每日新闻流"
-    system_version: str = "3.0.0"
+    system_version: str = "4.3.0"
 
     database_path: str = "data/news.db"
 
@@ -17,6 +18,7 @@ class Settings(BaseSettings):
     ai_model: str = "gpt-4o-mini"
     ai_translate_enabled: bool = True
     http_proxy: str = ""
+    cls_rss_url: str = "http://rsshub:1200/cls/telegraph"
 
     news_sources: List[Dict[str, Any]] = [
         {
@@ -27,17 +29,21 @@ class Settings(BaseSettings):
             "mode": "scrape",
             "link_patterns": ["/20", "politics", "world", "finance", "tech"],
             "max_articles": 20,
-            "priority": 5
+            "priority": 4
         },
         {
             "name": "财联社",
-            "url": "https://www.cls.cn/telegraph",
+            "url": "http://rsshub:1200/cls/telegraph",
+            "url_setting": "cls_rss_url",
             "enabled": True,
             "category": "财经",
-            "mode": "scrape",
-            "link_patterns": ["detail", "/telegraph/"],
-            "max_articles": 15,
-            "priority": 3
+            "mode": "rss",
+            "proxy_mode": "bypass",
+            "allow_missing_link": True,
+            "fetch_full_content": False,
+            "synthetic_link_prefix": "urn:newsflow:cls",
+            "max_articles": 20,
+            "priority": 5
         },
         {
             "name": "财经杂志",
@@ -47,7 +53,7 @@ class Settings(BaseSettings):
             "mode": "scrape",
             "link_patterns": ["/20", "article"],
             "max_articles": 15,
-            "priority": 3
+            "priority": 4
         },
         {
             "name": "财新网",
@@ -57,7 +63,7 @@ class Settings(BaseSettings):
             "mode": "scrape",
             "link_patterns": ["/20", "article"],
             "max_articles": 15,
-            "priority": 2
+            "priority": 5
         },
         {
             "name": "BBC News",
@@ -65,7 +71,8 @@ class Settings(BaseSettings):
             "enabled": True,
             "category": "英文",
             "mode": "rss",
-            "priority": 5
+            "priority": 3,
+            "max_articles": 20
         },
         {
             "name": "纽约时报",
@@ -73,7 +80,7 @@ class Settings(BaseSettings):
             "enabled": True,
             "category": "英文",
             "mode": "rss",
-            "priority": 5,
+            "priority": 4,
             "max_articles": 20
         },
         {
@@ -91,7 +98,8 @@ class Settings(BaseSettings):
             "enabled": False,
             "category": "英文",
             "mode": "rss",
-            "priority": 2
+            "priority": 5,
+            "max_articles": 20
         },
         {
             "name": "Reuters",
@@ -100,7 +108,8 @@ class Settings(BaseSettings):
             "category": "英文",
             "mode": "rss",
             "exclude_keywords": ["sport", "football", "soccer", "basketball", "tennis", "cricket", "entertainment", "celebrity", "movie", "fashion"],
-            "priority": 5
+            "priority": 5,
+            "max_articles": 20
         },
         {
             "name": "半岛电视台",
@@ -109,7 +118,8 @@ class Settings(BaseSettings):
             "category": "英文",
             "mode": "rss",
             "exclude_keywords": ["sport", "football", "soccer", "basketball", "tennis", "cricket", "entertainment", "celebrity", "movie"],
-            "priority": 4
+            "priority": 3,
+            "max_articles": 20
         }
     ]
 
@@ -117,6 +127,20 @@ class Settings(BaseSettings):
         "keywords": ["科技", "金融", "国际关系", "政治"],
         "exclude_keywords": ["娱乐", "体育", "八卦"],
         "max_news": 20,
+        "min_news": 16,
+        "candidate_pool_multiplier": 3,
+        "ai_filter_max_tokens": 4000,
+        "ai_filter_split_depth": 2,
+        "ai_reserve_score_min": 4,
+        "per_source_max": 4,
+        "per_story_max": 2,
+        "topic_quotas": {
+            "政策监管": 5,
+            "财经市场": 4,
+            "科技产业": 8,
+            "国际局势": 3,
+            "其他": 0
+        },
         "dedup_window_hours": 72,
         "event_memory_days": 7
     }
@@ -127,7 +151,7 @@ class Settings(BaseSettings):
         "title_template": "每日新闻简报 - {date}"
     }
 
-    category_order: List[str] = ["国际局势", "政策监管", "财经市场", "科技产业", "其他"]
+    category_order: List[str] = ["政策监管", "财经市场", "科技产业", "国际局势", "其他"]
 
     email_settings: Dict[str, Any] = {
         "smtp_host": "",
@@ -138,6 +162,17 @@ class Settings(BaseSettings):
         "recipients": "",
         "use_ssl": True
     }
+
+    def resolved_news_sources(self) -> List[Dict[str, Any]]:
+        """返回应用运行时 URL 覆盖后的新闻源副本。"""
+        sources = deepcopy(self.news_sources)
+        for source in sources:
+            setting_name = source.get("url_setting")
+            if setting_name:
+                configured_url = str(getattr(self, setting_name, "") or "").strip()
+                if configured_url:
+                    source["url"] = configured_url
+        return sources
 
     class Config:
         env_file = "api_config.env"

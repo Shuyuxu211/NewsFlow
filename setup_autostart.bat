@@ -39,7 +39,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 if exist "%SHORTCUT_PATH%" (
     echo SUCCESS: NewsFlow will auto-start on next boot.
 ) else (
-    echo FAILED: Unable to create shortcut. Run this script as Administrator.
+    echo FAILED: Unable to create shortcut. Check the Startup folder permissions and target path.
 )
 goto end
 
