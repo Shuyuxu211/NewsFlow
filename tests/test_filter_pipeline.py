@@ -340,6 +340,102 @@ class FilterPortfolioTests(unittest.TestCase):
 
         self.assertEqual({item["id"] for item in result}, {1, 2})
 
+    def test_ai_dedup_accepts_grounded_cross_source_duplicate_mapping(self):
+        news_filter = self._filter()
+
+        class _DedupClient:
+            def chat(self, **kwargs):
+                return json.dumps({
+                    "keep_indices": [0],
+                    "removed": [1],
+                    "duplicates": [{"remove": 1, "keep": 0, "reason": "同一谷歌广告技术裁决"}],
+                }, ensure_ascii=False)
+
+        news_filter.client = _DedupClient()
+        first = {
+            **self._item(1, "政策监管", "半岛电视台", "google-antitrust", 8),
+            "title": "US judge rejects bid to break up Google's ad tech business",
+            "summary": "A US judge rejected an antitrust request to force Google to sell its advertising technology business.",
+            "event_key": "judge-rejects-google-breakup",
+            "link": "https://example.invalid/aljazeera",
+        }
+        second = {
+            **self._item(2, "政策监管", "Financial Times", "google-antitrust", 8),
+            "title": "Judge rejects DOJ demand for Google to sell advertising business",
+            "summary": "The court rejected the US Justice Department demand that Google divest its ad technology operation.",
+            "event_key": "google-advertising-divestiture-ruling",
+            "link": "https://example.invalid/ft",
+        }
+
+        result = news_filter._deduplicate_similar([first, second])
+
+        self.assertEqual([item["id"] for item in result], [1])
+
+    def test_coarse_filter_excludes_unsupported_analyst_opinion(self):
+        news_filter = self._filter()
+        rules = {"include": [], "exclude": [], "max_news": 20}
+        vague_opinion = {
+            **self._item(1, "财经市场", "某财经媒体", "broker-view", 0),
+            "title": "券商分析师认为市场后续走势偏强",
+            "summary": "该分析师预计风险偏好将改善，但未提供新的数据或公司行动。",
+        }
+        numeric_forecast = {
+            **self._item(3, "财经市场", "某财经媒体", "broker-target", 0),
+            "title": "券商分析师预计指数将上涨10%",
+            "summary": "该预测仅为分析师目标位判断，没有新增市场事实。",
+        }
+        vague_research = {
+            **self._item(4, "科技产业", "某财经媒体", "vague-study", 0),
+            "title": "研究显示雇主对新兴AI职位需求下降",
+            "summary": "该研究称生成式AI正在冲击劳动力市场，但没有披露样本或数字。",
+        }
+        quantified_research = {
+            **self._item(5, "科技产业", "某财经媒体", "quantified-study", 0),
+            "title": "调查显示制造业订单增长12%",
+            "summary": "该调查披露制造业订单同比增长12%。",
+        }
+        official_signal = {
+            **self._item(2, "政策监管", "权威媒体", "fed-signal", 0),
+            "title": "美联储主席表示利率路径将取决于通胀数据",
+            "summary": "美联储主席在政策会议后说明利率决策条件。",
+        }
+
+        result = news_filter._coarse_filter(
+            [vague_opinion, numeric_forecast, vague_research, quantified_research, official_signal],
+            rules,
+        )
+
+        self.assertEqual([item["id"] for item in result], [5, 2])
+
+    def test_ai_summary_keeps_key_numbers_and_drops_speculative_tail(self):
+        news_filter = self._filter()
+        news = {
+            **self._item(1, "科技产业", "财经杂志", "earnings", 0),
+            "title": "逸仙电商公布二季度业绩",
+            "summary": "逸仙电商2026年二季度营收11.4亿元，同比增长5.1%，连续七个季度增长。",
+        }
+        response = json.dumps({
+            "results": {
+                "0": {
+                    "keep": 1,
+                    "score": 8,
+                    "impact_score": 7,
+                    "novelty_score": 8,
+                    "category": "科技产业",
+                    "story_key": "yatsen-earnings",
+                    "event_key": "yatsen-2026-q2",
+                    "reason": "公司业绩",
+                    "summary": "逸仙电商二季度营收保持增长，可能影响公司估值。",
+                }
+            }
+        }, ensure_ascii=False)
+
+        result = news_filter._parse_filter_result([news], response)
+
+        self.assertEqual(len(result), 1)
+        self.assertNotIn("可能影响", result[0]["ai_summary"])
+        self.assertRegex(result[0]["ai_summary"], r"11\.4|5\.1%")
+
     def test_packaged_briefing_content_is_coarsely_excluded(self):
         news_filter = self._filter()
         rules = {"include": [], "exclude": [], "max_news": 20}
@@ -361,14 +457,14 @@ class FilterPortfolioTests(unittest.TestCase):
         news = {
             "title": "Company expands capacity",
             "summary": "Company expands capacity by 20 percent.",
-            "ai_summary": "The company expands capacity, which may improve supply.",
+            "ai_summary": "The company expands capacity by 20 percent.",
         }
 
-        translator._apply_translation(news, "公司扩大产能", "公司扩大产能，可能改善供应。")
+        translator._apply_translation(news, "公司扩大产能", "公司将产能扩大20%。")
 
         self.assertEqual(news["title"], "公司扩大产能")
-        self.assertEqual(news["ai_summary"], "公司扩大产能，可能改善供应。")
-        self.assertEqual(news["ai_summary_original"], "The company expands capacity, which may improve supply.")
+        self.assertEqual(news["ai_summary"], "公司将产能扩大20%。")
+        self.assertEqual(news["ai_summary_original"], "The company expands capacity by 20 percent.")
         self.assertEqual(news["summary"], "Company expands capacity by 20 percent.")
         self.assertNotIn("summary_original", news)
 
@@ -377,18 +473,18 @@ class FilterPortfolioTests(unittest.TestCase):
 
         class _TranslationClient:
             def chat(self, **kwargs):
-                return "公司扩大产能\n公司扩大产能，可能改善供应。"
+                return "公司扩大产能\n公司将产能扩大20%。"
 
         translator.client = _TranslationClient()
         news = [{
             "title": "Company expands capacity",
             "summary": "Company expands capacity by 20 percent.",
-            "ai_summary": "The company expands capacity, which may improve supply.",
+            "ai_summary": "The company expands capacity by 20 percent.",
         }]
 
         translator._translate_batch_text(news)
 
-        self.assertEqual(news[0]["ai_summary"], "公司扩大产能，可能改善供应。")
+        self.assertEqual(news[0]["ai_summary"], "公司将产能扩大20%。")
 
     def test_translation_prefixes_are_removed(self):
         self.assertEqual(AITranslator._clean_translation_line("[3] 标题：芯片公司扩大产能"), "芯片公司扩大产能")

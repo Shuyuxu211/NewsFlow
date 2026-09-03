@@ -3,6 +3,7 @@ import os
 import re
 import time
 import asyncio
+from difflib import SequenceMatcher
 from typing import List, Dict, Any, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from src.config.config import settings
@@ -37,6 +38,102 @@ DEFAULT_EXCLUDE_KEYWORDS = [
 
 logger = logging.getLogger(__name__)
 
+KEY_FIGURE_RE = re.compile(
+    r'(?<![A-Za-z0-9.])(?:约|近|超|逾|至少|最多|超过|不足)?'
+    r'(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*'
+    r'(?:%|％|个百分点|个基点|基点|万亿|亿元|万元|亿港元|万港元|'
+    r'亿美元|万美元|欧元|英镑|港元|人民币|美元|元|万人|人|家|项|座|'
+    r'艘|架|辆|台|吨|桶|天|年|个月|月|周|倍|bps?|million|billion|'
+    r'trillion|percent)',
+    re.IGNORECASE,
+)
+
+THIRD_PARTY_OPINION_RE = re.compile(
+    r'券商|证券公司|分析师|策略师|研究员|首席经济学家|投行|机构观点|'
+    r'brokerage|broker|analyst|strategist|researcher|investment bank|economist',
+    re.IGNORECASE,
+)
+OPINION_LANGUAGE_RE = re.compile(
+    r'认为|预计|预期|预测|看好|警告|研判|观点|称.{0,12}(?:可能|或将|将会)|'
+    r'believes?|expects?|forecasts?|predicts?|sees?\b|warns?|outlook|view',
+    re.IGNORECASE,
+)
+VAGUE_RESEARCH_CLAIM_RE = re.compile(
+    r'研究显示|研究称|报告认为|报告称|调查认为|机构称|'
+    r'(?:study|research)\s+(?:shows?|finds?|suggests?)|report\s+(?:says?|suggests?)',
+    re.IGNORECASE,
+)
+FACTUAL_ACTION_RE = re.compile(
+    r'公布|发布|宣布|批准|签署|通过|实施|生效|达成|收购|出售|裁员|'
+    r'起诉|裁决|驳回|下调|上调|增持|减持|回购|融资|投产|交付|召回|'
+    r'数据显示|报告显示|reported|announced|approved|signed|passed|enacted|'
+    r'acquired|sold|cut jobs|filed|ruled|rejected|raised|lowered|launched|'
+    r'delivered|recalled|data show',
+    re.IGNORECASE,
+)
+
+
+def _key_figure_numbers(value: str) -> set[str]:
+    numbers = set()
+    for match in KEY_FIGURE_RE.finditer(str(value or '')):
+        number_match = re.search(r'\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?', match.group())
+        if number_match:
+            numbers.add(number_match.group().replace(',', ''))
+    return numbers
+
+
+def _strip_speculative_impact_tail(value: str) -> str:
+    text = str(value or '').strip()
+    tail = re.compile(
+        r'[，,；;]\s*(?:这|此|该(?:事件|决定|政策|行动|交易|裁决|数据|结果|举措))?\s*'
+        r'(?:可能|可|或将|或会|或可|预计将|预计会|预计可能|可望|有望)\s*'
+        r'[^，。；;]{0,80}(?:影响|冲击|压力|提振|利好|利空|改变|扰动|'
+        r'推高|压低|加剧|缓解|支撑|拖累|刺激)[^，。；;]*[。.]?$',
+    )
+    english_tail = re.compile(
+        r'[,;]\s*(?:which|this|the move|the decision)?\s*'
+        r'(?:may|might|could|is expected to)\s+[^.;]{0,100}'
+        r'(?:affect|impact|boost|weigh on|pressure|support|disrupt)[^.;]*[.]?$',
+        re.IGNORECASE,
+    )
+    previous = None
+    while text and text != previous:
+        previous = text
+        text = tail.sub('', text).strip()
+        text = english_tail.sub('', text).strip()
+    return text.rstrip('，,；;')
+
+
+def _summary_with_key_figures(news: Dict[str, Any], value: str) -> str:
+    summary = _strip_speculative_impact_tail(value)
+    source_text = f"{news.get('title', '')}。{news.get('summary', '') or ''}"
+    source_numbers = _key_figure_numbers(source_text)
+    if not source_numbers or source_numbers & _key_figure_numbers(summary):
+        return summary
+
+    clauses = [
+        clause.strip()
+        for clause in re.split(r'[。！？!?；;\n]+', source_text)
+        if _key_figure_numbers(clause)
+    ]
+    if not clauses:
+        return summary
+    clause = max(clauses, key=lambda item: (len(_key_figure_numbers(item)), -len(item)))
+    if len(clause) > 100:
+        first_figure = KEY_FIGURE_RE.search(clause)
+        center = first_figure.start() if first_figure else 0
+        start = max(0, center - 35)
+        clause = clause[start:start + 100].strip(' ，,；;')
+    clause = _strip_speculative_impact_tail(clause)
+    if not clause:
+        return summary
+    if not summary:
+        return clause
+    if clause.lower() in summary.lower():
+        return summary
+    separator = '; ' if re.search(r'[A-Za-z]', clause) else '；'
+    return f"{summary.rstrip('。.')}{separator}{clause}"
+
 FILTER_SYSTEM_PROMPT = """你是面向金融市场、宏观研究和产业研究读者的新闻晨报主编。你的目标不是挑选最轰动的新闻，而是在有限版面内形成均衡、可决策的新闻组合。
 
 【核心范围】
@@ -48,7 +145,7 @@ FILTER_SYSTEM_PROMPT = """你是面向金融市场、宏观研究和产业研究
 
 【必须降级或排除】
 1. 礼节性访问、视察调研、宣传通稿、人物特写、纪念活动
-2. 纯表态、纯观点或没有新数据和新行动的分析文章
+2. 纯表态、纯观点或没有新数据和新行动的分析文章；普通券商、分析师、策略师和研究员的预测或评论，没有可核验数据或新增事实时必须排除。央行行长、美联储主席等有政策决定权者的正式政策信号不按普通分析师处理
 3. 同一长期冲突的重复战况、口头威胁、采访角度和实时滚动更新；必须说明相对前序报道新增了什么
 4. 普通战况更新若没有重大升级或明确市场传导，最高不超过5分
 5. 体育、娱乐、社会软闻以及与市场无明显关系的事故和环境议题
@@ -71,7 +168,7 @@ FILTER_SYSTEM_PROMPT = """你是面向金融市场、宏观研究和产业研究
 - story_key：同一长期故事必须使用稳定、宽口径的短标识，例如同一战争、同一贸易争端、同一央行政策周期
 - event_key：同一具体事件必须使用稳定、窄口径的短标识
 - 不要因来源是国际大媒体而自动提高分数
-- summary只概括原文事实；若市场影响是推断，使用“可能”而不是写成既成事实
+- summary只写原文中可核验的事实、行动、结果和关键数字；原文有决策相关数字时必须保留。不要在末尾补写“可能影响/或将提振/可能造成冲击”等推断，影响判断只体现在impact_score和reason中
 
 请严格返回JSON，不要输出额外文字。"""
 
@@ -642,6 +739,14 @@ class AIFilter:
         if not summary:
             return news.get('title', '')[:50]
 
+        numeric_clauses = [
+            part.strip()
+            for part in re.split(r'[。！？!?；;\n]+', summary)
+            if _key_figure_numbers(part)
+        ]
+        if numeric_clauses:
+            return _summary_with_key_figures(news, numeric_clauses[0])
+
         # 先用句号/感叹号/问号分割，再用中文逗号/分号分割
         # 对齐 newsletter._generate_simple_summary() 的分割逻辑
         for sep in ['。', '！', '？', '；', '，']:
@@ -654,6 +759,23 @@ class AIFilter:
                     return part
 
         return summary[:60] + '...'
+
+    @staticmethod
+    def _is_unsupported_third_party_opinion(news: Dict[str, Any]) -> bool:
+        text = f"{news.get('title', '')} {news.get('summary', '') or ''}"
+        is_person_opinion = (
+            THIRD_PARTY_OPINION_RE.search(text) is not None
+            and OPINION_LANGUAGE_RE.search(text) is not None
+        )
+        is_vague_research_claim = VAGUE_RESEARCH_CLAIM_RE.search(text) is not None
+        if not is_person_opinion and not is_vague_research_claim:
+            return False
+        evidence_text = VAGUE_RESEARCH_CLAIM_RE.sub('', text)
+        if FACTUAL_ACTION_RE.search(evidence_text):
+            return False
+        if is_person_opinion:
+            return True
+        return KEY_FIGURE_RE.search(text) is None
 
     def _refill_after_dedup(
         self,
@@ -800,7 +922,12 @@ class AIFilter:
             title = news.get('title', '')
             summary = news.get('ai_summary', '') or (news.get('summary', '') or '')[:100]
             score = news.get('relevance_score', 5)
-            news_items.append(f"[{i}] 标题: {title}\n摘要: {summary[:80]}\n评分: {score}")
+            event_key = news.get('event_key', '')
+            source = news.get('source', '')
+            news_items.append(
+                f"[{i}] 标题: {title}\n来源: {source}\n事件键: {event_key}\n"
+                f"摘要: {summary[:140]}\n评分: {score}"
+            )
 
         return f"""请识别以下新闻中的重复/相似新闻，保留最重要的那条。
 
@@ -811,10 +938,15 @@ class AIFilter:
 - 保留评分最高的；如果评分相同，保留信息最完整的
 - 只有高置信度重复才移除，无法确认时保留全部条目
 
+每一条被移除的新闻都必须在duplicates中明确指出它与哪一条保留新闻属于同一具体事件；仅列removed而没有对应关系不算高置信度依据。
+
 请以JSON格式返回：
 {{
-  "keep_indices": [0, 3, 5, 8, 10],
-  "removed": [1, 2, 4, 6, 7, 9]
+  "keep_indices": [0, 2],
+  "removed": [1],
+  "duplicates": [
+    {{"remove": 1, "keep": 0, "reason": "同一公司同一裁决"}}
+  ]
 }}
 
 新闻列表：
@@ -851,6 +983,62 @@ class AIFilter:
 
         return False
 
+    @staticmethod
+    def _dedup_content_tokens(news: Dict[str, Any]) -> set[str]:
+        text = f"{news.get('title', '')} {news.get('ai_summary', '') or news.get('summary', '') or ''}".lower()
+        latin_stopwords = {
+            'about', 'after', 'again', 'against', 'from', 'into', 'more', 'over',
+            'says', 'that', 'their', 'this', 'with', 'would', 'news', 'report',
+        }
+        tokens = {
+            token for token in re.findall(r'[a-z0-9]+', text)
+            if len(token) >= 3 and token not in latin_stopwords
+        }
+        for segment in re.findall(r'[\u4e00-\u9fff]+', text):
+            cleaned = re.sub(r'(?:表示|报道|消息|可能|影响|认为|预计)', '', segment)
+            tokens.update(cleaned[i:i + 2] for i in range(max(len(cleaned) - 1, 0)))
+        return tokens
+
+    def _has_mapped_duplicate_evidence(
+        self,
+        candidate: Dict[str, Any],
+        existing: Dict[str, Any],
+    ) -> bool:
+        if self._has_high_confidence_duplicate(candidate, [existing]):
+            return True
+
+        candidate_title = str(candidate.get('title', '') or '')
+        existing_title = str(existing.get('title', '') or '')
+        candidate_subject = re.split(r'[:：]', candidate_title, maxsplit=1)[0].strip().lower()
+        existing_subject = re.split(r'[:：]', existing_title, maxsplit=1)[0].strip().lower()
+        if ':' in candidate_title or '：' in candidate_title:
+            if (':' in existing_title or '：' in existing_title) and candidate_subject != existing_subject:
+                return False
+
+        candidate_numbers = _key_figure_numbers(
+            f"{candidate_title} {candidate.get('ai_summary', '') or candidate.get('summary', '') or ''}"
+        )
+        existing_numbers = _key_figure_numbers(
+            f"{existing_title} {existing.get('ai_summary', '') or existing.get('summary', '') or ''}"
+        )
+        if candidate_numbers and existing_numbers and not (candidate_numbers & existing_numbers):
+            return False
+
+        candidate_tokens = self._dedup_content_tokens(candidate)
+        existing_tokens = self._dedup_content_tokens(existing)
+        shared = candidate_tokens & existing_tokens
+        union = candidate_tokens | existing_tokens
+        if len(shared) >= 4 and union and len(shared) / len(union) >= 0.24:
+            return True
+
+        normalized_candidate = re.sub(r'[^a-z0-9\u4e00-\u9fff]+', '', candidate_title.lower())
+        normalized_existing = re.sub(r'[^a-z0-9\u4e00-\u9fff]+', '', existing_title.lower())
+        return (
+            len(shared) >= 3
+            and min(len(normalized_candidate), len(normalized_existing)) >= 12
+            and SequenceMatcher(None, normalized_candidate, normalized_existing).ratio() >= 0.55
+        )
+
     def _parse_dedup_response(
         self,
         news_list: List[Dict[str, Any]],
@@ -877,10 +1065,30 @@ class AIFilter:
 
         kept_news = [news_list[i] for i in normalized_indices]
         removed_indices = [i for i in range(len(news_list)) if i not in normalized_indices]
+        mapped_duplicates = set()
+        duplicate_rows = result.get('duplicates', []) if result else []
+        if isinstance(duplicate_rows, list):
+            for row in duplicate_rows:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    remove_index = int(row.get('remove'))
+                    keep_index = int(row.get('keep'))
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    remove_index in removed_indices
+                    and keep_index in normalized_indices
+                    and self._has_mapped_duplicate_evidence(
+                        news_list[remove_index], news_list[keep_index]
+                    )
+                ):
+                    mapped_duplicates.add(remove_index)
         restored = [
             news_list[i]
             for i in removed_indices
-            if not self._has_high_confidence_duplicate(news_list[i], kept_news)
+            if i not in mapped_duplicates
+            and not self._has_high_confidence_duplicate(news_list[i], kept_news)
         ]
         if restored:
             logger.info(f"AI去重保护性恢复 {len(restored)} 条低置信度移除项")
@@ -1024,6 +1232,11 @@ class AIFilter:
             summary = news.get('summary', '') or ''
             text = f"{title} {summary}".lower()
 
+            if self._is_unsupported_third_party_opinion(news):
+                logger.info(f"粗筛排除无事实支撑的第三方观点: {title[:50]}")
+                news['_hard_excluded'] = True
+                continue
+
             excluded = False
             for kw in all_exclude:
                 if kw.lower() in text:
@@ -1074,6 +1287,8 @@ class AIFilter:
         for news in news_list:
             identity = news.get('id') or news.get('link') or id(news)
             if identity in selected_ids or not news.get('_ai_assessed'):
+                continue
+            if news.get('_hard_excluded'):
                 continue
             if news.get('topic') == '其他' or float(news.get('relevance_score', 0) or 0) < min_score:
                 continue
@@ -1170,7 +1385,7 @@ class AIFilter:
 - story_key：同一长期故事共享的稳定短标识
 - event_key：同一具体事件共享的稳定短标识
 - reason：保留或排除理由
-- summary：中文事实摘要，包含具体行动、数据和影响；推断使用“可能”
+- summary：中文事实摘要，只写原文中可核验的行动、结果和关键数字；原文有金额、比例、利率、产量、人数等决策相关数字时必须保留
 
 输出压缩要求：
 - 必须覆盖新闻列表中的每一个索引，不能省略被排除项
@@ -1181,13 +1396,15 @@ class AIFilter:
 约束：
 1. 普通战况、口头威胁、采访角度或实时滚动更新，没有重大升级时最高5分。
 2. 纯观点或没有新数据、新政策、新公司行动的文章应排除或降至4分以下。
-3. 公司产能、并购、业绩、供应链、融资和重大技术进展应优先于重复地缘报道。
-4. 不要因为来源是国际大媒体就自动加分。
+3. 普通券商、分析师、策略师、研究员或经济学家的预测和评论，若没有可核验数据或新增事实，keep必须为0；预测中的目标价、涨跌幅或点位仍是观点，不算事实数据。央行行长、美联储主席等有政策决定权者的正式政策信号除外。
+4. 公司产能、并购、业绩、供应链、融资和重大技术进展应优先于重复地缘报道。
+5. 不要因为来源是国际大媒体就自动加分。
+6. summary不得添加“可能影响……”“或将提振……”“可能造成冲击……”等推断性尾缀；影响判断只写入impact_score和reason，不写入展示摘要。
 
 严格返回：
 {{
   "results": {{
-    "0": {{"keep": 1, "score": 8, "impact_score": 8, "novelty_score": 9, "category": "科技产业", "story_key": "global-auto-capacity", "event_key": "company-cuts-one-million-capacity", "reason": "包含明确产能调整", "summary": "某汽车集团宣布削减100万辆产能，可能影响供应链和就业"}}
+    "0": {{"keep": 1, "score": 8, "impact_score": 8, "novelty_score": 9, "category": "科技产业", "story_key": "global-auto-capacity", "event_key": "company-cuts-one-million-capacity", "reason": "包含明确产能调整", "summary": "某汽车集团宣布削减100万辆产能"}}
   }}
 }}
 
@@ -1247,7 +1464,11 @@ class AIFilter:
             news['story_key'] = self._derive_story_key(news, item_result.get('story_key', ''))
             ai_summary = str(item_result.get('summary', '') or '').strip()
             if ai_summary:
-                news['ai_summary'] = ai_summary
+                news['ai_summary'] = _summary_with_key_figures(news, ai_summary)
+            if keep and self._is_unsupported_third_party_opinion(news):
+                keep = False
+                news['_hard_excluded'] = True
+                news['filter_reason'] = '无事实支撑的第三方观点'
             news['_ai_assessed'] = True
             news['_ai_keep'] = keep and score >= 5
 
@@ -1478,17 +1699,20 @@ class AITranslator:
     ) -> None:
         original_title = news.get('title', '')
         clean_title = self._clean_translation_line(translated_title)
-        clean_summary = self._clean_translation_line(translated_summary)
+        clean_summary = _strip_speculative_impact_tail(self._clean_translation_line(translated_summary))
         if clean_title:
             news['title_original'] = original_title
             news['title'] = clean_title
-        if clean_summary:
-            if news.get('ai_summary'):
+        existing_ai_summary = str(news.get('ai_summary', '') or '')
+        if existing_ai_summary and re.search(r'[\u4e00-\u9fff]', existing_ai_summary):
+            news['ai_summary'] = _summary_with_key_figures(news, existing_ai_summary)
+        elif clean_summary:
+            if existing_ai_summary:
                 news['ai_summary_original'] = news.get('ai_summary', '')
-                news['ai_summary'] = clean_summary
+                news['ai_summary'] = _summary_with_key_figures(news, clean_summary)
             else:
                 news['summary_original'] = news.get('summary', '')
-                news['summary'] = clean_summary
+                news['summary'] = _summary_with_key_figures(news, clean_summary)
         news['translated'] = 1
 
     def _translate_batch_text(self, news_batch: List[Dict[str, Any]]) -> None:
@@ -1506,13 +1730,13 @@ class AITranslator:
 
             prompt = f"""Translate the following English news into Simplified Chinese. For each item, return EXACTLY two lines:
 Line 1: Chinese title (concise, include key entities like country names, organizations)
-Line 2: Chinese summary (one sentence, 30-80 chars, MUST include: who did what + specific impact/data/casualties. Do NOT drop key facts like country names, death tolls, or causal relationships)
+Line 2: Chinese factual summary (one sentence, 30-80 chars, include who did what + confirmed result + every decision-relevant number/casualty. If Summary is already Chinese, repeat its facts faithfully. Do not add forecasts, market implications, or "may affect" tails)
 Separate each item with a blank line.
 
 {text}"""
 
             result_text = self.client.chat(
-                system_prompt="You are a professional English-to-Chinese news translator. Preserve ALL key facts: who, what, where, casualties, numbers, impacts. Never produce vague summaries that lose the core event.",
+                system_prompt="You are a professional English-to-Chinese news translator. Preserve all verified facts and key numbers. Never add forecasts, implications, or speculative impact statements.",
                 user_prompt=prompt,
                 temperature=0.3,
                 max_tokens=1500,
@@ -1549,13 +1773,13 @@ Separate each item with a blank line.
         summary = self._translation_summary(news)
         prompt = f"""Translate the following English news into Simplified Chinese. Return EXACTLY two lines:
 Line 1: Chinese title (concise, include key entities)
-Line 2: Chinese summary (one sentence, 30-80 chars, include who did what + specific impact)
+Line 2: Chinese factual summary (one sentence, 30-80 chars, include who did what + confirmed result + all key numbers; do not add forecasts or speculative impact tails)
 
 Title: {title}
 Summary: {summary}"""
 
         result_text = self.client.chat(
-            system_prompt="You are a professional English-to-Chinese news translator. Preserve ALL key facts.",
+            system_prompt="You are a professional English-to-Chinese news translator. Preserve all verified facts and key numbers. Never add forecasts or speculative implications.",
             user_prompt=prompt,
             temperature=0.3,
             max_tokens=500,
@@ -1589,13 +1813,13 @@ Summary: {summary}"""
 
             prompt = f"""Translate the following English news into Simplified Chinese. For each item, return EXACTLY two lines:
 Line 1: Chinese title (concise, include key entities like country names, organizations)
-Line 2: Chinese summary (one sentence, 30-80 chars, MUST include: who did what + specific impact/data/casualties. Do NOT drop key facts like country names, death tolls, or causal relationships)
+Line 2: Chinese factual summary (one sentence, 30-80 chars, include who did what + confirmed result + every decision-relevant number/casualty. If Summary is already Chinese, repeat its facts faithfully. Do not add forecasts, market implications, or "may affect" tails)
 Separate each item with a blank line.
 
 {text}"""
 
             result_text = await self.client.chat_async(
-                system_prompt="You are a professional English-to-Chinese news translator. Preserve ALL key facts: who, what, where, casualties, numbers, impacts. Never produce vague summaries that lose the core event.",
+                system_prompt="You are a professional English-to-Chinese news translator. Preserve all verified facts and key numbers. Never add forecasts, implications, or speculative impact statements.",
                 user_prompt=prompt,
                 temperature=0.3,
                 max_tokens=1500,
